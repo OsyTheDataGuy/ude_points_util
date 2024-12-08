@@ -1,4 +1,15 @@
 # -*- coding: utf-8 -*-
+# import packages
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sb
+import re
+from datetime import date, datetime
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
 '''1. Functions to Create Fighter Career Dataset'''
 def create_fighter_career_dataset(df, fighter_name):
     """
