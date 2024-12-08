@@ -114,8 +114,8 @@ def extract_fighter_details(df, fighter_name):
         'ctrl_in_secs': row['ctrl_in_secs_fighter_1'] if is_fighter_1[row.name] else row['ctrl_in_secs_fighter_2'],
         'ctrl_in_secs_diff': row['ctrl_in_secs_diff_fighter_1'] if is_fighter_1[row.name] else row['ctrl_in_secs_diff_fighter_2'],
         'age': row['fight_day_age (yrs)_fighter_1'] if is_fighter_1[row.name] else row['fight_day_age (yrs)_fighter_2'],
-        'height': row['Height (m)_fighter_1'] if is_fighter_1[row.name] else row['Height (m)_fighter_2'],
-        'reach': row['Reach (in)_fighter_1'] if is_fighter_1[row.name] else row['Reach (in)_fighter_2'],
+        'height (m)': row['Height (m)_fighter_1'] if is_fighter_1[row.name] else row['Height (m)_fighter_2'],
+        'reach (in)': row['Reach (in)_fighter_1'] if is_fighter_1[row.name] else row['Reach (in)_fighter_2'],
     }, axis=1, result_type='expand')
 
     return fighter_stats
@@ -190,8 +190,8 @@ def extract_opponent_details(df, fighter_name):
         'opponent_ctrl_in_secs': row['ctrl_in_secs_fighter_2'] if is_fighter_1[row.name] else row['ctrl_in_secs_fighter_1'],
         'opponent_ctrl_in_secs_diff': row['ctrl_in_secs_diff_fighter_2'] if is_fighter_1[row.name] else row['ctrl_in_secs_diff_fighter_1'],
         'opponent_age': row['fight_day_age (yrs)_fighter_2'] if is_fighter_1[row.name] else row['fight_day_age (yrs)_fighter_1'],
-        'opponent_height': row['Height (m)_fighter_2'] if is_fighter_1[row.name] else row['Height (m)_fighter_1'],
-        'opponent_reach': row['Reach (in)_fighter_2'] if is_fighter_1[row.name] else row['Reach (in)_fighter_1'],
+        'opponent_height (m)': row['Height (m)_fighter_2'] if is_fighter_1[row.name] else row['Height (m)_fighter_1'],
+        'opponent_reach (in)': row['Reach (in)_fighter_2'] if is_fighter_1[row.name] else row['Reach (in)_fighter_1'],
     }, axis=1, result_type='expand')
 
     return opponent_stats
