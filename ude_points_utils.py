@@ -225,8 +225,8 @@ def create_diff_columns(df):
     Returns:
     - pd.DataFrame: Final dataset with height_diff, reach_diff, and age_diff columns.
     """
-    df['height_diff'] = df['height'] - df['opponent_height']
-    df['reach_diff'] = df['reach'] - df['opponent_reach']
+    df['height_diff'] = df['height (m)'] - df['opponent_height (m)']
+    df['reach_diff'] = df['reach (in)'] - df['opponent_reach (in)']
     df['age_diff'] = df['age'] - df['opponent_age']
 
     return df.sort_values(by='event_date', ascending=False).reset_index(drop=True)
