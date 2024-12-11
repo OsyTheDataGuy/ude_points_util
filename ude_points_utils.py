@@ -619,7 +619,7 @@ def plot_dynamic_stat_comparison(fighter_stats_1, fighter_stats_2, column='dynam
         y=column,
         color='fighter',
         text='opponent',  # Add opponent names as text annotations
-        title=f"Comparison of {column.replace('_', ' ').title()} for {data_1.iloc[0,'fighter']} and {data_2.iloc[0,'fighter']}",
+        title=f"Comparison of {column.replace('_', ' ').title()} for {data_1.loc[0,'fighter']} and {data_2.loc[0,'fighter']}",
         labels={
             column: column.replace('_', ' ').title(),
             'event_date_str': 'Fight Date',
