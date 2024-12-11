@@ -587,7 +587,7 @@ def plot_cumulative_metric_combo(fighter_stats, fighter_name, column='dynamic_si
     fig.show()
 
 # Plot dynamic stats for two fighters
-def plot_dynamic_stat_comparison(fighter_stats_1, fighter_stats_2, fighter_1, fighter_2, column='dynamic_sig_strikes_def', subtitle=None, **kwargs):
+def plot_dynamic_stat_comparison(fighter_stats_1, fighter_stats_2, column='dynamic_sig_strikes_def', subtitle=None, **kwargs):
     """
     Plot the dynamic stats of two fighters over time for comparison.
 
@@ -608,8 +608,8 @@ def plot_dynamic_stat_comparison(fighter_stats_1, fighter_stats_2, fighter_1, fi
     data_2['event_date_str'] = data_2['event_date'].dt.strftime('%Y-%m-%d')
 
     # Combine data into a single DataFrame with a column indicating the fighter
-    data_1['warrior'] = fighter_1
-    data_2['warrior'] = fighter_2
+    # data_1['warrior'] = fighter_1
+    # data_2['warrior'] = fighter_2
     combined_data = pd.concat([data_1, data_2], ignore_index=True)
 
     # Create the Plotly line chart
@@ -617,9 +617,9 @@ def plot_dynamic_stat_comparison(fighter_stats_1, fighter_stats_2, fighter_1, fi
         data_frame=combined_data,
         x='event_date_str',
         y=column,
-        color='warrior',
+        color='fighter',
         text='opponent',  # Add opponent names as text annotations
-        title=f"Comparison of {column.replace('_', ' ').title()} for {fighter_1} and {fighter_2}",
+        title=f"Comparison of {column.replace('_', ' ').title()} for {data_1.iloc[0,'fighter']} and {data_2.iloc[0,'fighter']}",
         labels={
             column: column.replace('_', ' ').title(),
             'event_date_str': 'Fight Date',
