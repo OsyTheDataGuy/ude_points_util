@@ -447,7 +447,7 @@ def plot_diff(fighter_stats, fighter_name, diff_column='age_diff', title_bouts=T
     fig.show()
 
 # Plot cumulative_metric columns
-def plot_cumulative_metric_solo(fighter_stats, fighter_name, column='dynamic_sig_strikes_def', title_bouts=False, subtitle=None, **kwargs):
+def plot_cumulative_metric_solo(fighter_stats, column='dynamic_sig_strikes_def', title_bouts=False, subtitle=None, avg_med='mean', **kwargs):
     # Filter for title bouts if title_bouts is True
     if title_bouts:
         data = fighter_stats[fighter_stats['is_title_bout'] > 0]
@@ -456,11 +456,12 @@ def plot_cumulative_metric_solo(fighter_stats, fighter_name, column='dynamic_sig
 
     # Sort strictly by event_date
     data = data.sort_values(by='event_date')
+    fighter_name = data.loc[0,'fighter']
 
     # Convert event_date to string format to remove time
     data['event_date_str'] = data['event_date'].dt.strftime('%Y-%m-%d')
 
-    # last_word = column.split('_')[-1].capitalize()
+    # Generate the graph title
     graph_title = column.replace('_', ' ').title()
 
     # Create the Plotly line chart
@@ -469,15 +470,15 @@ def plot_cumulative_metric_solo(fighter_stats, fighter_name, column='dynamic_sig
         x='event_date_str',
         y=column,
         text='opponent',  # Add opponent names as text annotations
-        # title=f"Cumulative Significant Strike {last_word} in {'Title Bouts' if title_bouts else 'Career'} for {fighter_name}",
         title=f"{graph_title} in {'Title Bouts' if title_bouts else 'Career'} for {fighter_name}",
         labels={
-            # column: f'Cumulative Sig. Strike {last_word}',
             column: f'{column}',
             'event_date_str': 'Fight Date'
         },
         hover_data={
+            'age': True,
             'opponent': True,
+            'opponent_age': True,
             'event_name': True,
             'event_date_str': True,
             column: True
@@ -504,14 +505,27 @@ def plot_cumulative_metric_solo(fighter_stats, fighter_name, column='dynamic_sig
             yref="paper"
         )
 
+    # Add dashed line for mean or median if specified
+    if avg_med in ['mean', 'median']:
+        line_value = data[column].mean() if avg_med == 'mean' else data[column].median()
+        fig.add_hline(
+            y=line_value,
+            line_dash="dash",
+            line_color="red",
+            annotation_text=f"{avg_med.capitalize()}: {line_value:.2f}",
+            annotation_position="top left",
+            annotation_font_size=10
+        )
+
     # Update layout with any additional arguments passed via kwargs (e.g., height, width)
     fig.update_layout(**kwargs)
 
     # Show the plot
     fig.show()
 
+
 # Plot two cumulative_metrics
-def plot_cumulative_metric_combo(fighter_stats, fighter_name, column='dynamic_sig_strikes_def', opponent_column='opponent_dynamic_sig_strikes_acc', title_bouts=False, subtitle=None, **kwargs):
+def plot_cumulative_metric_combo(fighter_stats, column='dynamic_sig_strikes_def', opponent_column='opponent_dynamic_sig_strikes_acc', title_bouts=False, subtitle=None, **kwargs):
     # Filter for title bouts if title_bouts is True
     if title_bouts:
         data = fighter_stats[fighter_stats['is_title_bout'] > 0]
@@ -520,6 +534,7 @@ def plot_cumulative_metric_combo(fighter_stats, fighter_name, column='dynamic_si
 
     # Sort strictly by event_date
     data = data.sort_values(by='event_date')
+    fighter_name = data.loc[0, 'fighter']
 
     # Convert event_date to string format to remove time
     data['event_date_str'] = data['event_date'].dt.strftime('%Y-%m-%d')
