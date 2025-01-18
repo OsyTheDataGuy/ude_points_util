@@ -149,7 +149,7 @@ def extract_opponent_details(df, fighter_name):
     # Extract detailed stats for the opponent
     opponent_stats = df.apply(lambda row: {
         'opponent': row['fighter_2'] if is_fighter_1[row.name] else row['fighter_1'],
-        'opponent_is_champion': row['opponent_is_champion_fighter_2'] if is_fighter_1[row.name] else row['is_champion_fighter_1'],
+        'opponent_is_champion': row['is_champion_fighter_2'] if is_fighter_1[row.name] else row['is_champion_fighter_1'],
         'opponent_url': row['fighter_url_fighter_2'] if is_fighter_1[row.name] else row['fighter_url_fighter_1'],
         'opponent_pre_fight_record_(W-L-D NC)': row['pre_fight_record_fighter_2_(W-L-D NC)'] if is_fighter_1[row.name] else row['pre_fight_record_fighter_1_(W-L-D NC)'],
         'opponent_post_fight_record_(W-L-D NC)': row['post_fight_record_fighter_2_(W-L-D NC)'] if is_fighter_1[row.name] else row['post_fight_record_fighter_1_(W-L-D NC)'],
