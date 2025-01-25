@@ -23,13 +23,12 @@ def create_fighter_career_dataset(df, fighter_name):
     - pd.DataFrame: A new dataset containing the career details of the fighter.
     """
     fighter_fights = filter_fighter_fights(df, fighter_name)
-    fighter_details = extract_fighter_details(fighter_fights, fighter_name)
-    opponent_details = extract_opponent_details(fighter_fights, fighter_name)
-    final_dataset = reorganize_fight_data(fighter_fights, fighter_details, opponent_details)
+    fighter_details = extract_fighter_details_programmatically(fighter_fights, fighter_name)
+    opponent_details = extract_opponent_details_programmatically(fighter_fights, fighter_name)
+    final_dataset = reorganize_fight_data_programmatically(fighter_fights, fighter_details, opponent_details)
     final_dataset = create_diff_columns(final_dataset)
 
     return final_dataset
-
 
 def filter_fighter_fights(df, fighter_name):
     """
@@ -44,7 +43,70 @@ def filter_fighter_fights(df, fighter_name):
     """
     return df[(df['fighter_1'] == fighter_name) | (df['fighter_2'] == fighter_name)].copy()
 
+def extract_fighter_details_programmatically(df, fighter_name):
+    """
+    Extracts dynamic details of the specified fighter from each fight.
 
+    Args:
+    - df (pd.DataFrame): Filtered dataset of the fighter's fights.
+    - fighter_name (str): Name of the fighter.
+
+    Returns:
+    - pd.DataFrame: DataFrame containing fighter details for each fight.
+    """
+    # Create a mask to identify if the fighter is in fighter_1 or fighter_2 columns
+    is_fighter_1 = df['fighter_1'] == fighter_name
+
+    # Identify all columns that contain '_fighter_1' or '_fighter_2', except 'fighter_1' and 'fighter_2'
+    fighter_columns = [col for col in df.columns if ('fighter_1' in col or 'fighter_2' in col) and col not in ['fighter_1', 'fighter_2']]
+
+    # Dynamically create a dictionary of fighter-specific stats
+    fighter_stats = df.apply(
+        lambda row: {
+            'fighter': row['fighter_1'] if is_fighter_1[row.name] else row['fighter_2'],
+            **{
+                col.replace('_fighter_1', '').replace('_fighter_2', ''): 
+                row[col] if is_fighter_1[row.name] else row[col.replace('_fighter_1', '_fighter_2')]
+                for col in fighter_columns
+            }
+        }, axis=1
+    )
+
+    return pd.DataFrame(fighter_stats.tolist())
+
+
+def extract_opponent_details_programmatically(df, fighter_name):
+    """
+    Extracts dynamic details of the opponent from each fight.
+
+    Args:
+    - df (pd.DataFrame): Filtered dataset of the fighter's fights.
+    - fighter_name (str): Name of the fighter.
+
+    Returns:
+    - pd.DataFrame: DataFrame containing opponent details for each fight.
+    """
+    # Create a mask to identify if the fighter is in fighter_1 or fighter_2 columns
+    is_fighter_1 = df['fighter_1'] == fighter_name
+
+    # Identify all columns that contain '_fighter_1' or '_fighter_2', except 'fighter_1' and 'fighter_2'
+    fighter_columns = [col for col in df.columns if ('fighter_1' in col or 'fighter_2' in col) and col not in ['fighter_1', 'fighter_2']]
+
+    # Dynamically create a dictionary of opponent-specific stats
+    opponent_stats = df.apply(
+        lambda row: {
+            'opponent': row['fighter_2'] if is_fighter_1[row.name] else row['fighter_1'],
+            **{
+                'opponent_' + col.replace('_fighter_1', '').replace('_fighter_2', ''): 
+                row[col.replace('_fighter_1', '_fighter_2')] if is_fighter_1[row.name] else row[col.replace('_fighter_2', '_fighter_1')]
+                for col in fighter_columns
+            }
+        }, axis=1
+    )
+
+    return pd.DataFrame(opponent_stats.tolist())
+
+    
 def extract_fighter_details(df, fighter_name):
     """
     Extracts details of the specified fighter from each fight.
@@ -119,6 +181,22 @@ def extract_fighter_details(df, fighter_name):
         'ground_strikes_landed': row['ground_strikes_landed_fighter_1'] if is_fighter_1[row.name] else row['ground_strikes_landed_fighter_2'],
         'ground_strikes_attempted': row['ground_strikes_attempted_fighter_1'] if is_fighter_1[row.name] else row['ground_strikes_attempted_fighter_2'],
         'ground_strikes_landed_diff': row['ground_strikes_landed_diff_fighter_1'] if is_fighter_1[row.name] else row['ground_strikes_landed_diff_fighter_2'],
+        'head_strikes_landed_per_min': row['head_strikes_landed_per_min_fighter_1'] if is_fighter_1[row.name] else row['head_strikes_landed_per_min_fighter_2'],
+        'body_strikes_landed_per_min': row['body_strikes_landed_per_min_fighter_1'] if is_fighter_1[row.name] else row['body_strikes_landed_per_min_fighter_2'],
+        'leg_strikes_landed_per_min': row['leg_strikes_landed_per_min_fighter_1'] if is_fighter_1[row.name] else row['leg_strikes_landed_per_min_fighter_2'],
+        'distance_strikes_landed_per_min': row['distance_strikes_landed_per_min_fighter_1'] if is_fighter_1[row.name] else row['distance_strikes_landed_per_min_fighter_2'],
+        'clinch_strikes_landed_per_min': row['clinch_strikes_landed_per_min_fighter_1'] if is_fighter_1[row.name] else row['clinch_strikes_landed_per_min_fighter_2'],
+        'ground_strikes_landed_per_min': row['ground_strikes_landed_per_min_fighter_1'] if is_fighter_1[row.name] else row['ground_strikes_landed_per_min_fighter_2'],
+        'standing_sig_strikes_landed_per_min': row['standing_sig_strikes_landed_per_min_fighter_1'] if is_fighter_1[row.name] else row['standing_sig_strikes_landed_per_min_fighter_2'],
+        'total_strikes_landed_per_min': row['total_strikes_landed_per_min_fighter_1'] if is_fighter_1[row.name] else row['total_strikes_landed_per_min_fighter_2'],
+        'head_strikes_absorbed_per_min': row['head_strikes_absorbed_per_min_fighter_1'] if is_fighter_1[row.name] else row['head_strikes_absorbed_per_min_fighter_2'],
+        'body_strikes_absorbed_per_min': row['body_strikes_absorbed_per_min_fighter_1'] if is_fighter_1[row.name] else row['body_strikes_absorbed_per_min_fighter_2'],
+        'leg_strikes_absorbed_per_min': row['leg_strikes_absorbed_per_min_fighter_1'] if is_fighter_1[row.name] else row['leg_strikes_absorbed_per_min_fighter_2'],
+        'distance_strikes_absorbed_per_min': row['distance_strikes_absorbed_per_min_fighter_1'] if is_fighter_1[row.name] else row['distance_strikes_absorbed_per_min_fighter_2'],
+        'clinch_strikes_absorbed_per_min': row['clinch_strikes_absorbed_per_min_fighter_1'] if is_fighter_1[row.name] else row['clinch_strikes_absorbed_per_min_fighter_2'],
+        'ground_strikes_absorbed_per_min': row['ground_strikes_absorbed_per_min_fighter_1'] if is_fighter_1[row.name] else row['ground_strikes_absorbed_per_min_fighter_2'],
+        'standing_sig_strikes_absorbed_per_min': row['standing_sig_strikes_absorbed_per_min_fighter_1'] if is_fighter_1[row.name] else row['standing_sig_strikes_absorbed_per_min_fighter_2'],
+        'total_strikes_absorbed_per_min': row['total_strikes_absorbed_per_min_fighter_1'] if is_fighter_1[row.name] else row['total_strikes_absorbed_per_min_fighter_2'],
         'sub_att': row['sub_att_fighter_1'] if is_fighter_1[row.name] else row['sub_att_fighter_2'],
         'sub_att_diff': row['sub_att_diff_fighter_1'] if is_fighter_1[row.name] else row['sub_att_diff_fighter_2'],
         'rev': row['rev_fighter_1'] if is_fighter_1[row.name] else row['rev_fighter_2'],
@@ -207,6 +285,22 @@ def extract_opponent_details(df, fighter_name):
         'opponent_ground_strikes_landed': row['ground_strikes_landed_fighter_2'] if is_fighter_1[row.name] else row['ground_strikes_landed_fighter_1'],
         'opponent_ground_strikes_attempted': row['ground_strikes_attempted_fighter_2'] if is_fighter_1[row.name] else row['ground_strikes_attempted_fighter_1'],
         'opponent_ground_strikes_landed_diff': row['ground_strikes_landed_diff_fighter_2'] if is_fighter_1[row.name] else row['ground_strikes_landed_diff_fighter_1'],
+        'opponent_head_strikes_landed_per_min': row['head_strikes_landed_per_min_fighter_2'] if is_fighter_1[row.name] else row['head_strikes_landed_per_min_fighter_1'],
+        'opponent_body_strikes_landed_per_min': row['body_strikes_landed_per_min_fighter_2'] if is_fighter_1[row.name] else row['body_strikes_landed_per_min_fighter_1'],
+        'opponent_leg_strikes_landed_per_min': row['leg_strikes_landed_per_min_fighter_2'] if is_fighter_1[row.name] else row['leg_strikes_landed_per_min_fighter_1'],
+        'opponent_distance_strikes_landed_per_min': row['distance_strikes_landed_per_min_fighter_2'] if is_fighter_1[row.name] else row['distance_strikes_landed_per_min_fighter_1'],
+        'opponent_clinch_strikes_landed_per_min': row['clinch_strikes_landed_per_min_fighter_2'] if is_fighter_1[row.name] else row['clinch_strikes_landed_per_min_fighter_1'],
+        'opponent_ground_strikes_landed_per_min': row['ground_strikes_landed_per_min_fighter_2'] if is_fighter_1[row.name] else row['ground_strikes_landed_per_min_fighter_1'],
+        'opponent_standing_sig_strikes_landed_per_min': row['standing_sig_strikes_landed_per_min_fighter_2'] if is_fighter_1[row.name] else row['standing_sig_strikes_landed_per_min_fighter_1'],
+        'opponent_total_strikes_landed_per_min': row['total_strikes_landed_per_min_fighter_2'] if is_fighter_1[row.name] else row['total_strikes_landed_per_min_fighter_1'],
+        'opponent_head_strikes_absorbed_per_min': row['head_strikes_absorbed_per_min_fighter_2'] if is_fighter_1[row.name] else row['head_strikes_absorbed_per_min_fighter_1'],
+        'opponent_body_strikes_absorbed_per_min': row['body_strikes_absorbed_per_min_fighter_2'] if is_fighter_1[row.name] else row['body_strikes_absorbed_per_min_fighter_1'],
+        'opponent_leg_strikes_absorbed_per_min': row['leg_strikes_absorbed_per_min_fighter_2'] if is_fighter_1[row.name] else row['leg_strikes_absorbed_per_min_fighter_1'],
+        'opponent_distance_strikes_absorbed_per_min': row['distance_strikes_absorbed_per_min_fighter_2'] if is_fighter_1[row.name] else row['distance_strikes_absorbed_per_min_fighter_1'],
+        'opponent_clinch_strikes_absorbed_per_min': row['clinch_strikes_absorbed_per_min_fighter_2'] if is_fighter_1[row.name] else row['clinch_strikes_absorbed_per_min_fighter_1'],
+        'opponent_ground_strikes_absorbed_per_min': row['ground_strikes_absorbed_per_min_fighter_2'] if is_fighter_1[row.name] else row['ground_strikes_absorbed_per_min_fighter_1'],
+        'opponent_standing_sig_strikes_absorbed_per_min': row['standing_sig_strikes_absorbed_per_min_fighter_2'] if is_fighter_1[row.name] else row['standing_sig_strikes_absorbed_per_min_fighter_1'],
+        'opponent_total_strikes_absorbed_per_min': row['total_strikes_absorbed_per_min_fighter_2'] if is_fighter_1[row.name] else row['total_strikes_absorbed_per_min_fighter_1'],
         'opponent_sub_att': row['sub_att_fighter_2'] if is_fighter_1[row.name] else row['sub_att_fighter_1'],
         'opponent_sub_att_diff': row['sub_att_diff_fighter_2'] if is_fighter_1[row.name] else row['sub_att_diff_fighter_1'],
         'opponent_rev': row['rev_fighter_2'] if is_fighter_1[row.name] else row['rev_fighter_1'],
@@ -218,6 +312,22 @@ def extract_opponent_details(df, fighter_name):
     }, axis=1, result_type='expand')
 
     return opponent_stats
+
+def reorganize_fight_data_programmatically(df, fighter_details, opponent_details):
+    """
+    Reorganizes and combines fight data into the final dataset structure.
+
+    Args:
+    - df (pd.DataFrame): Filtered dataset of the fighter's fights.
+    - fighter_details (pd.DataFrame): Fighter stats and details.
+    - opponent_details (pd.DataFrame): Opponent stats and details.
+
+    Returns:
+    - pd.DataFrame: Final dataset with organized fight data.
+    """
+    shared_cols = [col for col in df.columns if 'fighter_1' not in col and 'fighter_2' not in col]
+    fight_data = pd.concat([df[shared_cols], fighter_details, opponent_details], axis=1)
+    return fight_data.reset_index(drop=True)
 
 
 def reorganize_fight_data(df, fighter_details, opponent_details):
