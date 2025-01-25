@@ -65,7 +65,7 @@ def extract_fighter_details_programmatically(df, fighter_name):
         lambda row: {
             'fighter': row['fighter_1'] if is_fighter_1[row.name] else row['fighter_2'],
             **{
-                col.replace('_fighter_1', '').replace('_fighter_2', ''): 
+                col.replace('_fighter_1', '').replace('_fighter_2', '').lower(): 
                 row[col] if is_fighter_1[row.name] else row[col.replace('_fighter_1', '_fighter_2')]
                 for col in fighter_columns
             }
@@ -97,7 +97,7 @@ def extract_opponent_details_programmatically(df, fighter_name):
         lambda row: {
             'opponent': row['fighter_2'] if is_fighter_1[row.name] else row['fighter_1'],
             **{
-                'opponent_' + col.replace('_fighter_1', '').replace('_fighter_2', ''): 
+                'opponent_' + col.replace('_fighter_1', '').replace('_fighter_2', '').lower(): 
                 row[col.replace('_fighter_1', '_fighter_2')] if is_fighter_1[row.name] else row[col.replace('_fighter_2', '_fighter_1')]
                 for col in fighter_columns
             }
