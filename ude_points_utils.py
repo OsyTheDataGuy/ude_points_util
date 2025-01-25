@@ -26,7 +26,7 @@ def create_fighter_career_dataset(df, fighter_name):
     fighter_details = extract_fighter_details_programmatically(fighter_fights, fighter_name)
     opponent_details = extract_opponent_details_programmatically(fighter_fights, fighter_name)
     final_dataset = reorganize_fight_data_programmatically(fighter_fights, fighter_details, opponent_details)
-    # final_dataset = create_diff_columns(final_dataset)
+    final_dataset = create_diff_columns(final_dataset)
 
     return final_dataset
 
@@ -101,7 +101,7 @@ def extract_opponent_details_programmatically(df, fighter_name):
             'opponent': row['fighter_2'] if is_fighter_1[row.name] else row['fighter_1'],
             'opponent_age': row['fight_day_age (yrs)_fighter_2'] if is_fighter_1[row.name] else row['fight_day_age (yrs)_fighter_1'],
             **{
-                'opponent_' + col: 
+                'opponent_' + col.replace('_fighter_1', '').replace('_fighter_2', ''): 
                 # Find the column from fighter_columns that matches the cleaned column and contains '_fighter_2' or '_fighter_1'
                 row[col if 'fighter_2' in col else col.replace('_fighter_1', '_fighter_2')] if is_fighter_1[row.name] 
                 else row[col if 'fighter_1' in col else col.replace('_fighter_2', '_fighter_1')]
