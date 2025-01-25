@@ -73,7 +73,7 @@ def extract_fighter_details_programmatically(df, fighter_name):
         }, axis=1, result_type='expand'
     )
 
-    return pd.DataFrame(fighter_stats.tolist())
+    return fighter_stats
 
 
 def extract_opponent_details_programmatically(df, fighter_name):
@@ -106,7 +106,7 @@ def extract_opponent_details_programmatically(df, fighter_name):
         }, axis=1, result_type='expand'
     )
 
-    return pd.DataFrame(opponent_stats.tolist())
+    return opponent_stats
 
     
 def extract_fighter_details(df, fighter_name):
