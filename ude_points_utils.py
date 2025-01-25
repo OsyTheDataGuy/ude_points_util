@@ -60,15 +60,23 @@ def extract_fighter_details_programmatically(df, fighter_name):
     # Identify all columns that contain '_fighter_1' or '_fighter_2', except 'fighter_1' and 'fighter_2'
     fighter_columns = [col for col in df.columns if ('fighter_1' in col or 'fighter_2' in col) and col not in ['fighter_1', 'fighter_2']]
 
-    # Dynamically create a dictionary of fighter-specific stats
-    fighter_stats = df.apply(
+    # Clean column names (remove '_fighter_1' and '_fighter_2' and lowercase them)
+    clean_fighter_columns = [col.replace('_fighter_1', '').replace('_fighter_2', '').lower() for col in fighter_columns]
+
+    # Remove duplicates by converting to a set
+    clean_fighter_columns = set(clean_fighter_columns)
+
+    # Dynamically create a dictionary of opponent-specific stats
+    opponent_stats = df.apply(
         lambda row: {
             'fighter': row['fighter_1'] if is_fighter_1[row.name] else row['fighter_2'],
             'age': row['fight_day_age (yrs)_fighter_1'] if is_fighter_1[row.name] else row['fight_day_age (yrs)_fighter_2'],
             **{
-                col.replace('_fighter_1', '').replace('_fighter_2', '').lower(): 
-                row[col] if is_fighter_1[row.name] else row[col.replace('_fighter_1', '_fighter_2')]
-                for col in fighter_columns
+                col: 
+                # Find the column from fighter_columns that matches the cleaned column and contains '_fighter_2' or '_fighter_1'
+                row[next(item for item in fighter_columns if col in item and '_fighter_1' in item)] if is_fighter_1[row.name] 
+                else row[next(item for item in fighter_columns if col in item and '_fighter_2' in item)]
+                for col in clean_fighter_columns
             }
         }, axis=1, result_type='expand'
     )
@@ -93,20 +101,29 @@ def extract_opponent_details_programmatically(df, fighter_name):
     # Identify all columns that contain '_fighter_1' or '_fighter_2', except 'fighter_1' and 'fighter_2'
     fighter_columns = [col for col in df.columns if ('fighter_1' in col or 'fighter_2' in col) and col not in ['fighter_1', 'fighter_2']]
 
+    # Clean column names (remove '_fighter_1' and '_fighter_2' and lowercase them)
+    clean_fighter_columns = [col.replace('_fighter_1', '').replace('_fighter_2', '').lower() for col in fighter_columns]
+
+    # Remove duplicates by converting to a set
+    clean_fighter_columns = set(clean_fighter_columns)
+
     # Dynamically create a dictionary of opponent-specific stats
     opponent_stats = df.apply(
         lambda row: {
             'opponent': row['fighter_2'] if is_fighter_1[row.name] else row['fighter_1'],
             'opponent_age': row['fight_day_age (yrs)_fighter_2'] if is_fighter_1[row.name] else row['fight_day_age (yrs)_fighter_1'],
             **{
-                'opponent_' + col.replace('_fighter_1', '').replace('_fighter_2', '').lower(): 
-                row[col.replace('_fighter_1', '_fighter_2')] if is_fighter_1[row.name] else row[col.replace('_fighter_2', '_fighter_1')]
-                for col in fighter_columns
+                'opponent_' + col: 
+                # Find the column from fighter_columns that matches the cleaned column and contains '_fighter_2' or '_fighter_1'
+                row[next(item for item in fighter_columns if col in item and '_fighter_2' in item)] if is_fighter_1[row.name] 
+                else row[next(item for item in fighter_columns if col in item and '_fighter_1' in item)]
+                for col in clean_fighter_columns
             }
         }, axis=1, result_type='expand'
     )
 
     return opponent_stats
+
 
     
 def extract_fighter_details(df, fighter_name):
