@@ -70,7 +70,7 @@ def extract_fighter_details_programmatically(df, fighter_name):
                 row[col] if is_fighter_1[row.name] else row[col.replace('_fighter_1', '_fighter_2')]
                 for col in fighter_columns
             }
-        }, axis=1
+        }, axis=1, result_type='expand'
     )
 
     return pd.DataFrame(fighter_stats.tolist())
@@ -103,7 +103,7 @@ def extract_opponent_details_programmatically(df, fighter_name):
                 row[col.replace('_fighter_1', '_fighter_2')] if is_fighter_1[row.name] else row[col.replace('_fighter_2', '_fighter_1')]
                 for col in fighter_columns
             }
-        }, axis=1
+        }, axis=1, result_type='expand'
     )
 
     return pd.DataFrame(opponent_stats.tolist())
