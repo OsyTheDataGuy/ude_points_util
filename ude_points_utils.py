@@ -64,6 +64,7 @@ def extract_fighter_details_programmatically(df, fighter_name):
     fighter_stats = df.apply(
         lambda row: {
             'fighter': row['fighter_1'] if is_fighter_1[row.name] else row['fighter_2'],
+            'age': row['fight_day_age (yrs)_fighter_1'] if is_fighter_1[row.name] else row['fight_day_age (yrs)_fighter_2'],
             **{
                 col.replace('_fighter_1', '').replace('_fighter_2', '').lower(): 
                 row[col] if is_fighter_1[row.name] else row[col.replace('_fighter_1', '_fighter_2')]
@@ -96,6 +97,7 @@ def extract_opponent_details_programmatically(df, fighter_name):
     opponent_stats = df.apply(
         lambda row: {
             'opponent': row['fighter_2'] if is_fighter_1[row.name] else row['fighter_1'],
+            'opponent_age': row['fight_day_age (yrs)_fighter_2'] if is_fighter_1[row.name] else row['fight_day_age (yrs)_fighter_1'],
             **{
                 'opponent_' + col.replace('_fighter_1', '').replace('_fighter_2', '').lower(): 
                 row[col.replace('_fighter_1', '_fighter_2')] if is_fighter_1[row.name] else row[col.replace('_fighter_2', '_fighter_1')]
