@@ -61,13 +61,13 @@ def extract_fighter_details_programmatically(df, fighter_name):
     fighter_columns = [col for col in df.columns if ('fighter_1' in col or 'fighter_2' in col) and col not in ['fighter_1', 'fighter_2']]
 
     # Clean column names (remove '_fighter_1' and '_fighter_2' and lowercase them)
-    clean_fighter_columns = [col.replace('_fighter_1', '').replace('_fighter_2', '').lower() for col in fighter_columns]
+    clean_fighter_columns = [col.replace('_fighter_1', '').replace('_fighter_2', '') for col in fighter_columns]
 
     # Remove duplicates by converting to a set
     clean_fighter_columns = set(clean_fighter_columns)
 
     # Dynamically create a dictionary of opponent-specific stats
-    opponent_stats = df.apply(
+    fighter_stats = df.apply(
         lambda row: {
             'fighter': row['fighter_1'] if is_fighter_1[row.name] else row['fighter_2'],
             'age': row['fight_day_age (yrs)_fighter_1'] if is_fighter_1[row.name] else row['fight_day_age (yrs)_fighter_2'],
@@ -101,8 +101,8 @@ def extract_opponent_details_programmatically(df, fighter_name):
     # Identify all columns that contain '_fighter_1' or '_fighter_2', except 'fighter_1' and 'fighter_2'
     fighter_columns = [col for col in df.columns if ('fighter_1' in col or 'fighter_2' in col) and col not in ['fighter_1', 'fighter_2']]
 
-    # Clean column names (remove '_fighter_1' and '_fighter_2' and lowercase them)
-    clean_fighter_columns = [col.replace('_fighter_1', '').replace('_fighter_2', '').lower() for col in fighter_columns]
+    # Clean column names (remove '_fighter_1' and '_fighter_2'
+    clean_fighter_columns = [col.replace('_fighter_1', '').replace('_fighter_2', '') for col in fighter_columns]
 
     # Remove duplicates by converting to a set
     clean_fighter_columns = set(clean_fighter_columns)
@@ -377,8 +377,8 @@ def create_diff_columns(df):
     Returns:
     - pd.DataFrame: Final dataset with height_diff, reach_diff, and age_diff columns.
     """
-    df['height_diff'] = df['height (m)'] - df['opponent_height (m)']
-    df['reach_diff'] = df['reach (in)'] - df['opponent_reach (in)']
+    df['height_diff'] = df['Height (m)'] - df['opponent_Height (m)']
+    df['reach_diff'] = df['Reach (in)'] - df['opponent_Reach (in)']
     df['age_diff'] = df['age'] - df['opponent_age']
 
     return df.sort_values(by='event_date', ascending=False).reset_index(drop=True)
