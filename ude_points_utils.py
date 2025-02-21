@@ -141,7 +141,7 @@ def reorganize_fight_data(df, fighter_details, opponent_details):
     Returns:
     - pd.DataFrame: Final dataset with organized fight data.
     """
-    fight_data = pd.concat([df[['event_date', 'event_name', 'event_url', 'bout', 'fight_url', 'weight_class', 'weight_class_cleaned','is_title_bout',
+    fight_data = pd.concat([df[['event_date', 'event_name', 'event_url', 'bout', 'result', 'fight_url', 'weight_class', 'weight_class_cleaned','is_title_bout',
                                 'time_format', 'match_format_rounds', 'is_rematch', 'method', 'method_mapped', 'time', 'time_in_mins',
                                 'round_ended', 'total_time_in_mins', 'who_won_striking', 'who_won_wrestling', 'who_won_grappling', 'who_won_control',
                                 'who_won_standing_danger', 'dominant_fighter', 'phases_won']], fighter_details, opponent_details], axis=1)
