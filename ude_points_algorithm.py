@@ -938,7 +938,7 @@ def calculate_ude_points_with_ablation(df, ablate=None, opponent_quality_k=OQ_DE
 
             # Invariant bonuses (not passed through perf_scale): opponent-age, own-age, rematch.
             age_pts = round(age_fn(points, result, opponent_age, weight_class, current_age_calibration) - points, 2)
-            own_age_pts = round(own_age_fn(points, result, fighter_age, weight_class, current_age_calibration) - points, 2)
+            own_age_pts = round(own_age_fn(points, result, fighter_age, opponent_age, weight_class, current_age_calibration) - points, 2)
             rematch_pts = round(rematch_fn(points, result, fighter, opponent, df, current_fight_date) - points, 2)
             points_before_opponent_quality = points
             opponent_quality_pts = round(opponent_quality_fn(
