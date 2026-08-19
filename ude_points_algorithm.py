@@ -86,7 +86,7 @@ def championship_bonus(points, result, is_championship):
         if result == 'W':
             return points * 2.0
         elif result == 'L':
-            return points * 1.25
+            return points * 2.0
     return points
 
 def multi_division_championship_bonus(points, result, is_title_bout, fighter_url, weight_class, fighter_title_weight_classes):
