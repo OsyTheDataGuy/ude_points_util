@@ -600,3 +600,105 @@ def plot_dynamic_stat_comparison(fighter_stats_1, fighter_stats_2, column='dynam
 
     # Show the plot
     fig.show()
+
+'''4. Functions to ranking by Ude points (career-end rank)'''
+def get_latest_ude_points_with_details(df):
+    """
+    Get each fighter's latest Ude points after their last fight,
+    including age and record at that time.
+    """
+    # Sort the dataframe by event date to ensure the most recent fight is last
+    df = df.sort_values(by='event_date')
+
+    # Initialize a dictionary to store the latest Ude points, age, and record for each fighter
+    latest_ude_points = {}
+
+    # Loop through each fight and update the latest Ude points, age, and record for each fighter
+    for index, row in df.iterrows():
+        # For fighter 1
+        fighter_1 = row['fighter_1']
+        fighter_1_url = row['fighter_url_fighter_1']
+        post_fight_ude_1 = row['ude_points_post_fight_fighter_1']
+        age_1 = row['fight_day_age (yrs)_fighter_1']
+        record_1 = row['post_fight_record_fighter_1_(W-L-D NC)']
+
+        latest_ude_points[fighter_1_url] = {
+            'fighter': fighter_1,
+            'latest_ude_points': post_fight_ude_1,
+            'age': age_1,
+            'record': record_1
+        }
+
+        # For fighter 2
+        fighter_2 = row['fighter_2']
+        fighter_2_url = row['fighter_url_fighter_2']
+        post_fight_ude_2 = row['ude_points_post_fight_fighter_2']
+        age_2 = row['fight_day_age (yrs)_fighter_2']
+        record_2 = row['post_fight_record_fighter_2_(W-L-D NC)']
+
+        latest_ude_points[fighter_2_url] = {
+            'fighter': fighter_2,
+            'latest_ude_points': post_fight_ude_2,
+            'age': age_2,
+            'record': record_2
+        }
+
+    return latest_ude_points
+
+def rank_fighters_by_latest_ude_points(df):
+    """
+    Rank fighters by their latest Ude points and return as a dataframe.
+    """
+    # Get the latest Ude points, age, and record for all fighters
+    latest_ude_points = get_latest_ude_points_with_details(df)
+
+    # Convert the latest Ude points dictionary into a dataframe
+    ude_points_df = pd.DataFrame.from_dict(latest_ude_points, orient='index')
+
+    # Rename the columns for clarity
+    ude_points_df.reset_index(inplace=True)
+    ude_points_df.rename(columns={'index': 'fighter_url'}, inplace=True)
+
+    # Sort the dataframe by Ude points in descending order
+    ude_points_df = ude_points_df.sort_values(by='latest_ude_points', ascending=False).reset_index(drop=True)
+
+    return ude_points_df[['fighter', 'fighter_url', 'age', 'record', 'latest_ude_points']]
+
+'''5. Functions to ranking by Ude points (rank by career peak Ude rating)'''
+def rank_fighters_by_peak_ude_points(df):
+    # Melt the dataframe to combine fighter_1 and fighter_2 stats into a single 'fighter' column
+    fighter_1_data = df[['fighter_1', 'fighter_url_fighter_1','ude_points_post_fight_fighter_1',
+                          'fight_day_age (yrs)_fighter_1',
+                          'post_fight_record_fighter_1_(W-L-D NC)']].rename(columns={
+        'fighter_1': 'fighter', 'fighter_url_fighter_1': 'fighter_url',
+        'ude_points_post_fight_fighter_1': 'ude_points_post_fight',
+        'fight_day_age (yrs)_fighter_1': 'age_at_peak_ude_points',
+        'post_fight_record_fighter_1_(W-L-D NC)': 'post_fight_record'
+    })
+
+    fighter_2_data = df[['fighter_2', 'fighter_url_fighter_2','ude_points_post_fight_fighter_2',
+                          'fight_day_age (yrs)_fighter_2',
+                          'post_fight_record_fighter_2_(W-L-D NC)']].rename(columns={
+        'fighter_2': 'fighter', 'fighter_url_fighter_2': 'fighter_url',
+        'ude_points_post_fight_fighter_2': 'ude_points_post_fight',
+        'fight_day_age (yrs)_fighter_2': 'age_at_peak_ude_points',
+        'post_fight_record_fighter_2_(W-L-D NC)': 'post_fight_record'
+    })
+
+    # Combine both sets of data
+    combined_fighter_data = pd.concat([fighter_1_data, fighter_2_data], axis=0)
+
+    # Find the index of the maximum ude_points_post_fight for each fighter
+    max_indices = combined_fighter_data.groupby('fighter')['ude_points_post_fight'].idxmax()
+
+    # Use the max indices to filter the combined data
+    fighter_max_ude_points = combined_fighter_data.loc[max_indices]
+
+    # Sort by ude_points_post_fight in descending order to rank fighters
+    fighter_max_ude_points_sorted = fighter_max_ude_points.sort_values(by='ude_points_post_fight', ascending=False).drop_duplicates('fighter_url', keep='first').reset_index(drop=True)
+
+    # Add a ranking column
+    fighter_max_ude_points_sorted['rank'] = fighter_max_ude_points_sorted['ude_points_post_fight'].rank(method='dense', ascending=False).astype(int)
+
+    # Return relevant columns
+    return fighter_max_ude_points_sorted[['fighter', 'fighter_url', 'age_at_peak_ude_points', 'post_fight_record', 'ude_points_post_fight', 'rank']]
