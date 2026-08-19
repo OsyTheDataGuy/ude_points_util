@@ -360,11 +360,21 @@ def age_adjustment(points, result, opponent_age, weight_class, calibration):
     return round(points * multiplier, 2)
 
 
-def own_age_adjustment(points, result, fighter_age, weight_class, calibration):
+# def own_age_adjustment(points, result, fighter_age, weight_class, calibration):
+#     multiplier = _age_multiplier(fighter_age, calibration, 'own', result)
+#     return round(points * multiplier, 2)
+# gate own_age_adjustment by opponent_age so we don't reward aging fighters for beating older fighters past their prime
+def own_age_adjustment(points, result, fighter_age, opponent_age, weight_class, calibration):
+    # Structural Gate: The own-age bonus is strictly conditional on defeating an 
+    # opponent who is at or below the reference age. 
+    if result == 'W':
+        reference_age = calibration['reference_age']
+        if pd.isna(opponent_age) or opponent_age > reference_age:
+            return round(points, 2) # Nullifies the bonus, equivalent to multiplier = 1.0
+            
     multiplier = _age_multiplier(fighter_age, calibration, 'own', result)
     return round(points * multiplier, 2)
-
-
+    
 def _get_previous_fights(fighter, opponent, df, current_fight_date):
     """
     Shared lookup for all previous meetings between `fighter` and `opponent`.
