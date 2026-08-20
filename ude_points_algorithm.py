@@ -405,10 +405,27 @@ def _rematch_count_bonus(points, result, previous_fights):
         return round(points * penalty_multiplier, 2)
     return points
 
-def rematch_adjustment(points, result, fighter, opponent, df, current_fight_date):
-    previous_fights = _get_previous_fights(fighter, opponent, df, current_fight_date)
-    points = _revenge_bonus(points, result, fighter, opponent, previous_fights)
-    points = _rematch_count_bonus(points, result, previous_fights)
+def rematch_adjustment(points, result, fighter, opponent, df, current_fight_date, pair_history_cache=None):
+    """Apply revenge/rematch effects from strictly prior meetings.
+
+    With the incremental pair-history state supplied by the scoring loop, this
+    is equivalent to the historical dataframe-filter implementation without
+    repeatedly scanning the full fight dataframe.
+    """
+    if pair_history_cache is None:
+        previous_fights = _get_previous_fights(fighter, opponent, df, current_fight_date)
+        points = _revenge_bonus(points, result, fighter, opponent, previous_fights)
+        return _rematch_count_bonus(points, result, previous_fights)
+
+    key = tuple(sorted((fighter, opponent)))
+    state = pair_history_cache.get(key)
+    if state is None or state['count'] == 0:
+        return points
+
+    if result == 'W' and state['first_result_by_fighter'].get(fighter) == 'L':
+        points = round(points * 1.15, 2)
+    if result == 'L':
+        points = round(points * (1.0 + min(state['count'], 5) * 0.10), 2)
     return points
 
 def title_defense_bonus(raw_base_points, fighter_defenses, is_champion, is_title_bout, result):
@@ -467,16 +484,32 @@ def dominance_adjustment(points, fighter_name, opponent_name, result, method_map
 
 
 def higher_rated_opponent_bonus(points, result, diff):
-    if result != 'W':
-        return points
-    if 30 <= diff <= 39:
-        return points + 3
-    elif 40 <= diff <= 49:
-        return points + 5
-    elif 50 <= diff <= 59:
-        return points + 7
-    elif diff >= 60:
-        return points + 9
+    """Reward wins over higher-rated opponents and penalize bad losses symmetrically.
+
+    ``diff`` is opponent_pre_fight_ude - fighter_pre_fight_ude. Therefore:
+      * positive diff on a win = upset win;
+      * negative diff on a loss = bad loss.
+
+    The loss tiers mirror the win tiers exactly in magnitude.
+    """
+    if result == 'W':
+        if 30 <= diff <= 39:
+            return points + 3
+        elif 40 <= diff <= 49:
+            return points + 5
+        elif 50 <= diff <= 59:
+            return points + 7
+        elif diff >= 60:
+            return points + 9
+    elif result == 'L':
+        if -39 <= diff <= -30:
+            return points - 3
+        elif -49 <= diff <= -40:
+            return points - 5
+        elif -59 <= diff <= -50:
+            return points - 7
+        elif diff <= -60:
+            return points - 9
     return points
 
 # Opponent-quality adjustment
@@ -539,21 +572,21 @@ def opponent_quality_multiplier(opponent_pre_fight_record, opponent_is_champion,
 def opponent_quality_adjustment(points, result, opponent_pre_fight_record,
                                 opponent_is_champion, opponent_title_defenses,
                                 k=OQ_DEFAULT_K):
-    """
-    Adjust fight points for the quality of the opponent using pre-fight signals:
-      1. Shrunk opponent win rate;
-      2. Current champion status;
-      3. Prior title-defense depth (capped).
+    """Adjust fight points for pre-fight opponent quality.
 
-    The multiplier is clipped to +/-50% so opponent quality cannot dominate the 
-    result of the fight itself. Applied to both wins and losses.
+    Wins retain the original quality multiplier. For losses, the multiplier is
+    reflected around 1.0 (``2 - win_multiplier``): elite opposition therefore
+    cushions a loss, while low-quality opposition amplifies it. Both directions
+    remain bounded by the same 0.50x-1.50x limits.
     """
     if result not in ('W', 'L'):
         return points
 
-    multiplier = opponent_quality_multiplier(
+    win_multiplier = opponent_quality_multiplier(
         opponent_pre_fight_record, opponent_is_champion, opponent_title_defenses, k=k
     )
+    multiplier = win_multiplier if result == 'W' else (2.0 - win_multiplier)
+    multiplier = max(OQ_MIN_MULTIPLIER, min(OQ_MAX_MULTIPLIER, multiplier))
     return round(points * multiplier, 2)
 
 # ---------------------------------------------------------------------------
@@ -750,20 +783,50 @@ def method_pdi_residual_points(method_mapped, pdi_margin, calibration, result):
     mapped=METHOD_RESIDUAL_MAX_POINTS * np.tanh(delta/scale)
     return round(float(mapped if result=='W' else -mapped), 4)
 
+LOSS_METHOD_SEVERITY = {
+    'Finish': 1.00,
+    'UD': 0.75,
+    'MD': 0.68,
+    'SD': 0.60,
+}
+
 def get_performance_scaling_factor(result, method_mapped, pdi_margin, dominant_fighter=None, fighter_name=None, opponent_name=None):
-    """Method-neutral scaling of contextual bonuses from PDI."""
-    if result != 'W':
-        return 1.0
-    if pdi_margin is None or (isinstance(pdi_margin,float) and pd.isna(pdi_margin)):
-        if dominant_fighter == opponent_name: t=-1.0
-        elif dominant_fighter == fighter_name: t=1.0
-        else: t=0.0
+    """Scale contextual bonuses/penalties by fight performance.
+
+    Wins use the existing PDI-only curve. Losses use the inverse directional
+    interpretation: being clearly outclassed (negative PDI margin) increases the
+    scaling of contextual penalties, while outperforming an opponent despite
+    losing (positive PDI margin) suppresses them. Losses also receive a method
+    severity factor so stoppages cost more than decisions, and split decisions
+    cost least.
+    """
+    if pdi_margin is None or (isinstance(pdi_margin, float) and pd.isna(pdi_margin)):
+        if dominant_fighter == opponent_name:
+            t = -1.0
+        elif dominant_fighter == fighter_name:
+            t = 1.0
+        else:
+            t = 0.0
     else:
-        t=max(-1.0,min(1.0,float(pdi_margin)/PDI_MARGIN_SCALE))
-    # same curve for all methods; method residual is the only method-specific layer
-    mid_pivot=0.75; low_anchor=0.30; high_anchor=1.0
-    scale=mid_pivot+t*(high_anchor-mid_pivot) if t>=0 else mid_pivot+t*(mid_pivot-low_anchor)
-    return round(max(0.20,min(1.0,scale)),4)
+        t = max(-1.0, min(1.0, float(pdi_margin) / PDI_MARGIN_SCALE))
+
+    if result == 'W':
+        mid_pivot = 0.75
+        low_anchor = 0.30
+        high_anchor = 1.0
+        scale = (mid_pivot + t * (high_anchor - mid_pivot) if t >= 0
+                 else mid_pivot + t * (mid_pivot - low_anchor))
+        return round(max(0.20, min(1.0, scale)), 4)
+
+    if result == 'L':
+        # Reverse the win-side PDI relationship: outclassed losses get more
+        # contextual-penalty exposure; competitive losses get less.
+        pdi_scale = 0.80 - 0.30 * t
+        pdi_scale = max(0.50, min(1.10, pdi_scale))
+        method_scale = LOSS_METHOD_SEVERITY.get(method_mapped, 0.75)
+        return round(max(0.30, min(1.10, pdi_scale * method_scale)), 4)
+
+    return 1.0
 
 def _neutral_age_calibration(reason='insufficient_prior_history'):
     return {
@@ -850,6 +913,9 @@ def calculate_ude_points_with_ablation(df, ablate=None, opponent_quality_k=OQ_DE
     fighter_ude_points = {}
     fighter_title_weight_classes = defaultdict(set)
 
+    # Incremental chronological pair history for rematch/revenge scoring.
+    pair_history_cache = {}
+
     for index, row in df.iterrows():
         weight_class = row['weight_class_cleaned']
         fighter_1_url = row['fighter_url_fighter_1']
@@ -933,13 +999,18 @@ def calculate_ude_points_with_ablation(df, ablate=None, opponent_quality_k=OQ_DE
             upset_diff = opponent_pre_fight_ude - pre_fight_ude
             upset_bonus = round(higher_rated_fn(points, result, upset_diff) - points, 2)
 
+            df.at[index, f'performance_scaling_factor_{fighter_col}'] = perf_scale
+            df.at[index, f'higher_rated_opponent_bonus_{fighter_col}'] = upset_bonus
+
             combined_bonuses = t_def_bonus + streak_bonus + upset_bonus
             scaled_bonuses = round(combined_bonuses * perf_scale, 2)
 
             # Invariant bonuses (not passed through perf_scale): opponent-age, own-age, rematch.
             age_pts = round(age_fn(points, result, opponent_age, weight_class, current_age_calibration) - points, 2)
             own_age_pts = round(own_age_fn(points, result, fighter_age, opponent_age, weight_class, current_age_calibration) - points, 2)
-            rematch_pts = round(rematch_fn(points, result, fighter, opponent, df, current_fight_date) - points, 2)
+            rematch_pts = round(rematch_fn(
+                points, result, fighter, opponent, df, current_fight_date, pair_history_cache
+            ) - points, 2)
             points_before_opponent_quality = points
             opponent_quality_pts = round(opponent_quality_fn(
                 points, result, opponent_pre_fight_record, opponent_is_champion,
@@ -968,6 +1039,15 @@ def calculate_ude_points_with_ablation(df, ablate=None, opponent_quality_k=OQ_DE
             df.at[index, f'ude_points_post_fight_{fighter_col}'] = post_fight_ude
 
         fighter_ude_points.update(post_fight_updates)
+
+        pair_key = tuple(sorted((fighter_1_url, fighter_2_url)))
+        state = pair_history_cache.setdefault(
+            pair_key, {'count': 0, 'first_result_by_fighter': {}}
+        )
+        if state['count'] == 0:
+            state['first_result_by_fighter'][fighter_1_url] = row['fight_result_fighter_1']
+            state['first_result_by_fighter'][fighter_2_url] = row['fight_result_fighter_2']
+        state['count'] += 1
 
     return df.sort_values(by='event_date', ascending=False).reset_index(drop=True)
 
