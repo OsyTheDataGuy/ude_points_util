@@ -783,23 +783,25 @@ def method_pdi_residual_points(method_mapped, pdi_margin, calibration, result):
     mapped=METHOD_RESIDUAL_MAX_POINTS * np.tanh(delta/scale)
     return round(float(mapped if result=='W' else -mapped), 4)
 
-LOSS_METHOD_SEVERITY = {
-    'Finish': 1.00,
-    'UD': 0.75,
-    'MD': 0.68,
-    'SD': 0.60,
-}
-
 def get_performance_scaling_factor(result, method_mapped, pdi_margin, dominant_fighter=None, fighter_name=None, opponent_name=None):
-    """Scale contextual bonuses/penalties by fight performance.
-
-    Wins use the existing PDI-only curve. Losses use the inverse directional
-    interpretation: being clearly outclassed (negative PDI margin) increases the
-    scaling of contextual penalties, while outperforming an opponent despite
-    losing (positive PDI margin) suppresses them. Losses also receive a method
-    severity factor so stoppages cost more than decisions, and split decisions
-    cost least.
     """
+    Method-neutral scaling of contextual bonuses from PDI.
+
+    Wins: t is the fighter's own normalized pdi_margin. A dominant win
+    (t near +1) scales contextual bonuses toward 1.0; a win despite being
+    outperformed on the stats (t near -1) scales them down toward low_anchor.
+
+    Losses: mirrored on how decisive the loss was, using the same curve
+    shape and the same [0.20, 1.0] clip range as wins (no separate
+    method-severity axis, so a bad loss's penalties are bounded by the same
+    ceiling a great win's bonuses are). A thoroughly outclassed loss (t near
+    -1) scales contextual penalties (bad-loss, cold-streak-loss) toward full
+    strength; a loss despite winning the underlying stats (t positive -- a
+    close/questionable decision loss) scales penalties down, since the
+    performance itself wasn't actually bad.
+    """
+    if result not in ('W', 'L'):
+        return 1.0
     if pdi_margin is None or (isinstance(pdi_margin, float) and pd.isna(pdi_margin)):
         if dominant_fighter == opponent_name:
             t = -1.0
@@ -810,23 +812,13 @@ def get_performance_scaling_factor(result, method_mapped, pdi_margin, dominant_f
     else:
         t = max(-1.0, min(1.0, float(pdi_margin) / PDI_MARGIN_SCALE))
 
-    if result == 'W':
-        mid_pivot = 0.75
-        low_anchor = 0.30
-        high_anchor = 1.0
-        scale = (mid_pivot + t * (high_anchor - mid_pivot) if t >= 0
-                 else mid_pivot + t * (mid_pivot - low_anchor))
-        return round(max(0.20, min(1.0, scale)), 4)
-
-    if result == 'L':
-        # Reverse the win-side PDI relationship: outclassed losses get more
-        # contextual-penalty exposure; competitive losses get less.
-        pdi_scale = 0.80 - 0.30 * t
-        pdi_scale = max(0.50, min(1.10, pdi_scale))
-        method_scale = LOSS_METHOD_SEVERITY.get(method_mapped, 0.75)
-        return round(max(0.30, min(1.10, pdi_scale * method_scale)), 4)
-
-    return 1.0
+    mid_pivot = 0.75
+    low_anchor = 0.30
+    high_anchor = 1.0
+    s = t if result == 'W' else -t
+    scale = (mid_pivot + s * (high_anchor - mid_pivot) if s >= 0
+             else mid_pivot + s * (mid_pivot - low_anchor))
+    return round(max(0.20, min(1.0, scale)), 4)
 
 def _neutral_age_calibration(reason='insufficient_prior_history'):
     return {
@@ -1025,9 +1017,13 @@ def calculate_ude_points_with_ablation(df, ablate=None, opponent_quality_k=OQ_DE
             points = max(-ABSOLUTE_SWING_CAP, min(ABSOLUTE_SWING_CAP, points))
 
             # Persist opponent-quality diagnostics for audit/ablation analysis.
-            oq_mult = 1.0 + (opponent_quality_pts / points_before_opponent_quality) if points_before_opponent_quality != 0 else 1.0
             oq_quality = quality_score(opponent_pre_fight_record, opponent_is_champion, opponent_title_defenses)
-            oq_mult = opponent_quality_multiplier(opponent_pre_fight_record, opponent_is_champion, opponent_title_defenses, k=opponent_quality_k)
+            oq_win_mult = opponent_quality_multiplier(opponent_pre_fight_record, opponent_is_champion, opponent_title_defenses, k=opponent_quality_k)
+            # opponent_quality_adjustment() reflects this around 1.0 for losses
+            # (2.0 - win_multiplier, reclipped) -- mirror that here so this
+            # logged column matches the multiplier actually applied to points,
+            # rather than always showing the un-reflected win-direction value.
+            oq_mult = oq_win_mult if result == 'W' else max(OQ_MIN_MULTIPLIER, min(OQ_MAX_MULTIPLIER, 2.0 - oq_win_mult))
             df.at[index, f'quality_score_{opponent_col}'] = round(oq_quality, 6)
             df.at[index, f'quality_multiplier_{opponent_col}'] = round(oq_mult, 6)
             df.at[index, f'opponent_quality_adjustment_{fighter_col}'] = opponent_quality_pts
