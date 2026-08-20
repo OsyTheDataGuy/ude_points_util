@@ -593,7 +593,7 @@ def opponent_quality_adjustment(points, result, opponent_pre_fight_record,
         # Elite/high-quality opponents do not cushion a loss.
         # Weak opponents amplify the loss in proportion to how far their
         # OQ falls below the empirical quality center.
-        oq = opponent_quality_score(
+        oq = quality_score(
             opponent_pre_fight_record, opponent_is_champion, opponent_title_defenses
         )
         if oq >= OQ_CENTER:
