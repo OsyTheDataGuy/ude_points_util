@@ -574,10 +574,11 @@ def opponent_quality_adjustment(points, result, opponent_pre_fight_record,
                                 k=OQ_DEFAULT_K):
     """Adjust fight points for pre-fight opponent quality.
 
-    Wins retain the original quality multiplier. For losses, the multiplier is
-    reflected around 1.0 (``2 - win_multiplier``): elite opposition therefore
-    cushions a loss, while low-quality opposition amplifies it. Both directions
-    remain bounded by the same 0.50x-1.50x limits.
+    Wins retain the original quality multiplier. For losses, elite/high-quality
+    opposition provides no cushion (1.0x). Losses to below-center opponents
+    are amplified according to ``1 + k * (OQ_CENTER - OQ)`` and bounded at
+    1.50x. This makes loss sensitivity asymmetric: elite losses remain fully
+    informative, while bad losses become more costly.
     """
     if result not in ('W', 'L'):
         return points
@@ -585,7 +586,22 @@ def opponent_quality_adjustment(points, result, opponent_pre_fight_record,
     win_multiplier = opponent_quality_multiplier(
         opponent_pre_fight_record, opponent_is_champion, opponent_title_defenses, k=k
     )
-    multiplier = win_multiplier if result == 'W' else (2.0 - win_multiplier)
+
+    if result == 'W':
+        multiplier = win_multiplier
+    else:
+        # Elite/high-quality opponents do not cushion a loss.
+        # Weak opponents amplify the loss in proportion to how far their
+        # OQ falls below the empirical quality center.
+        oq = opponent_quality_score(
+            opponent_pre_fight_record, opponent_is_champion, opponent_title_defenses
+        )
+        if oq >= OQ_CENTER:
+            multiplier = 1.0
+        else:
+            multiplier = 1.0 + k * (OQ_CENTER - oq)
+        multiplier = max(1.0, min(OQ_MAX_MULTIPLIER, multiplier))
+
     multiplier = max(OQ_MIN_MULTIPLIER, min(OQ_MAX_MULTIPLIER, multiplier))
     return round(points * multiplier, 2)
 
