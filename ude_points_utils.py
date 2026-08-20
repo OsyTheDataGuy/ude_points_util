@@ -702,3 +702,74 @@ def rank_fighters_by_peak_ude_points(df):
 
     # Return relevant columns
     return fighter_max_ude_points_sorted[['fighter', 'fighter_url', 'age_at_peak_ude_points', 'post_fight_record', 'ude_points_post_fight', 'rank']]
+ 
+'''6. Functions to ranking by Ude points (rank by shrunk career points-per-fight rate)'''
+def rank_fighters_by_shrunk_ude_rate(df, prior_strength=10.0):
+    """
+    Rank fighters by career UDE points earned PER FIGHT, shrunk toward the
+    population mean rate via Bayesian shrinkage -- the same pattern used by
+    shrunk_win_rate() in ude_points_algorithm.py (there with a strength-5
+    prior toward a .500 win rate; here with a strength-10 prior toward the
+    population's mean per-fight rate).
+ 
+    Why this exists: rank_fighters_by_latest_ude_points() and
+    rank_fighters_by_peak_ude_points() both rank on a cumulative career sum
+    that starts at 500 and never decays or normalizes by fight count. That
+    makes total career fight VOLUME alone able to compound a mediocre
+    per-fight rate into a high cumulative rank -- e.g. a fighter who fought
+    20 times and won 12 (60%) can out-accumulate a fighter who fought 8 times
+    and won 7 (87.5%), purely because they had more fights to accumulate
+    points in, independent of whether each individual fight was scored
+    correctly. This function answers a different, and for a "greatest ever"
+    ranking arguably more appropriate, question: how much value did this
+    fighter generate ON AVERAGE per fight, with small career sample sizes
+    (e.g. a fighter with 3-4 UFC fights) pulled toward the mean rather than
+    let a tiny denominator produce an inflated or deflated rate.
+ 
+    Args:
+    - df (pd.DataFrame): The scored fight dataset (post ude_points_algorithm).
+    - prior_strength (float): Bayesian shrinkage prior strength, in
+      equivalent number of fights. Default 10.0, consistent with the
+      project's existing shrinkage convention.
+ 
+    Returns:
+    - pd.DataFrame with columns: fighter, fighter_url, age, record, n_fights,
+      career_point_gain, raw_rate, shrunk_rate, rank. Sorted descending by
+      shrunk_rate.
+    """
+    # Reuse the existing career-total logic to get each fighter's final
+    # cumulative UDE points, age, and record at their last fight.
+    latest_ude_points = get_latest_ude_points_with_details(df)
+    ude_points_df = pd.DataFrame.from_dict(latest_ude_points, orient='index')
+    ude_points_df.reset_index(inplace=True)
+    ude_points_df.rename(columns={'index': 'fighter_url'}, inplace=True)
+ 
+    # Career point gain relative to the fixed starting value of 500.
+    STARTING_UDE_POINTS = 500.0
+    ude_points_df['career_point_gain'] = ude_points_df['latest_ude_points'] - STARTING_UDE_POINTS
+ 
+    # Count total scored fights per fighter_url from both sides of the dataset.
+    fighter_1_urls = df[['fighter_url_fighter_1']].rename(columns={'fighter_url_fighter_1': 'fighter_url'})
+    fighter_2_urls = df[['fighter_url_fighter_2']].rename(columns={'fighter_url_fighter_2': 'fighter_url'})
+    fight_counts = pd.concat([fighter_1_urls, fighter_2_urls]).groupby('fighter_url').size()
+    fight_counts.name = 'n_fights'
+ 
+    ude_points_df = ude_points_df.merge(fight_counts, left_on='fighter_url', right_index=True, how='left')
+ 
+    # Raw (unshrunk) per-fight rate.
+    ude_points_df['raw_rate'] = ude_points_df['career_point_gain'] / ude_points_df['n_fights']
+ 
+    # Bayesian shrinkage toward the population mean rate, weighted by prior_strength
+    # equivalent fights -- identical in form to shrunk_win_rate()'s treatment of
+    # win rate, just applied to points-per-fight instead of wins-per-fight.
+    population_mean_rate = ude_points_df['raw_rate'].mean()
+    ude_points_df['shrunk_rate'] = (
+        (ude_points_df['career_point_gain'] + prior_strength * population_mean_rate)
+        / (ude_points_df['n_fights'] + prior_strength)
+    )
+ 
+    ude_points_df = ude_points_df.sort_values(by='shrunk_rate', ascending=False).reset_index(drop=True)
+    ude_points_df['rank'] = ude_points_df['shrunk_rate'].rank(method='dense', ascending=False).astype(int)
+ 
+    return ude_points_df[['fighter', 'fighter_url', 'age', 'record', 'n_fights',
+                           'career_point_gain', 'raw_rate', 'shrunk_rate', 'rank']]
