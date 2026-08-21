@@ -20,10 +20,16 @@ Core Adjustments & Bonuses:
 9. Higher-Rated Opponent Bonus: Additive upset bonus anchored to underdog win-probability drops.
 """
 
-from collections import defaultdict
+from collections import defaultdict, deque
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
+
+# Window (in fights) for the trailing rolling average used by
+# higher_rated_opponent_bonus's rating-gap calculation. See that function's
+# docstring for why a smoothed rating is used instead of the raw
+# instantaneous pre-fight UDE snapshot.
+UPSET_RATING_WINDOW = 3
 
 def noop(points, *args, **kwargs):
     return points
@@ -482,25 +488,50 @@ def dominance_adjustment(points, fighter_name, opponent_name, result, method_map
     multiplier = _interpolate_dominance_multiplier(t, high_anchor, low_anchor)
     return round(points * multiplier, 2)
 
-def higher_rated_opponent_bonus(points, result, diff):
-    if result == 'W':
-        if diff >= 60:
-            return points + 9
-        elif diff >= 50:
-            return points + 7
-        elif diff >= 40:
-            return points + 5
-        elif diff >= 30:
-            return points + 3
-    elif result == 'L':
-        if diff <= -60:
-            return points - 9
-        elif diff <= -50:
-            return points - 7
-        elif diff <= -40:
-            return points - 5
-        elif diff <= -30:
-            return points - 3
+HIGHER_RATED_GAP_FLOOR = 15.0     # gaps below this earn zero bonus/penalty
+HIGHER_RATED_GAP_SCALE = 30.0     # controls how quickly tanh approaches its asymptote
+HIGHER_RATED_MAX_MAGNITUDE = 9.0  # asymptotic cap, replaces the old diff>=60 tier
+
+def higher_rated_opponent_bonus(points, result, diff, perf_scale=1.0):
+    """
+    Smooth, bounded replacement for the old discrete diff>=30/40/50/60 step
+    function. Both branches are continuous in `diff`, are exactly 0 for
+    gaps at/under HIGHER_RATED_GAP_FLOOR, and asymptotically saturate at
+    +/- HIGHER_RATED_MAX_MAGNITUDE via tanh (never exceeding it, unlike the
+    old open-ended `diff >= 60 -> +9` tier which had no upper bound on diff
+    itself even though the payout was flat past 60).
+
+    Performance coupling: the raw tanh magnitude is scaled by `perf_scale`
+    before being added, so a rating-gap bonus/penalty is damped when the
+    underlying in-fight performance (PDI-derived) was not itself decisive,
+    and preserved at full strength when it was. This mirrors how
+    scaled_bonuses already treats title-defense and streak bonuses --
+    upset bonus is computed and returned pre-scaled here so it must NOT be
+    passed through the combined_bonuses * perf_scale step a second time at
+    the call site.
+
+    `diff` is expected to already be a SMOOTHED rating gap (trailing
+    UPSET_RATING_WINDOW-fight average for both fighters, computed by the
+    caller -- see _trailing_rating_for_upset below), not the raw
+    instantaneous pre-fight UDE difference. UDE's own point ledger is
+    self-referential and can jump 10+ points off a single fight
+    (championship 2x, dominance, upset bonus all stacking); using the
+    literal snapshot as an "how much of an underdog was I" proxy makes the
+    very next fight's upset gap mechanically shrink or inflate based on
+    scoring-order artifacts rather than a fighter's actual standing. The
+    trailing average keeps the underdog signal this function exists to
+    capture while damping that single-fight whiplash.
+    """
+    if result == 'W' and diff > 0:
+        raw_bonus = HIGHER_RATED_MAX_MAGNITUDE * np.tanh(
+            max(0.0, (diff - HIGHER_RATED_GAP_FLOOR) / HIGHER_RATED_GAP_SCALE)
+        )
+        return points + raw_bonus * perf_scale
+    elif result == 'L' and diff < 0:
+        raw_penalty = -HIGHER_RATED_MAX_MAGNITUDE * np.tanh(
+            max(0.0, (abs(diff) - HIGHER_RATED_GAP_FLOOR) / HIGHER_RATED_GAP_SCALE)
+        )
+        return points + raw_penalty * perf_scale
     return points
 # Opponent-quality adjustment
 # Deliberately evaluates the PRE-FIGHT signal: the opponent's record, championship
@@ -914,6 +945,19 @@ def calculate_ude_points_with_ablation(df, ablate=None, opponent_quality_k=OQ_DE
     # Incremental chronological pair history for rematch/revenge scoring.
     pair_history_cache = {}
 
+    # Trailing post-fight UDE ratings per fighter, capped to the last
+    # UPSET_RATING_WINDOW fights. Used only to smooth the rating gap fed
+    # into higher_rated_opponent_bonus (see that function's docstring).
+    # Left empty for a fighter's first fight, which correctly falls back to
+    # their instantaneous pre-fight rating (500, the default) below.
+    fighter_rating_history = defaultdict(lambda: deque(maxlen=UPSET_RATING_WINDOW))
+
+    def _trailing_rating_for_upset(fighter_url, instantaneous_pre_fight_rating):
+        history = fighter_rating_history[fighter_url]
+        if not history:
+            return instantaneous_pre_fight_rating
+        return sum(history) / len(history)
+
     for index, row in df.iterrows():
         weight_class = row['weight_class_cleaned']
         fighter_1_url = row['fighter_url_fighter_1']
@@ -994,13 +1038,28 @@ def calculate_ude_points_with_ablation(df, ablate=None, opponent_quality_k=OQ_DE
             # to decouple it from standard multipliers active on title-defense fights.
             t_def_bonus = round(title_defense_fn(raw_base_points, title_defenses, is_champion, is_title_bout, result) - raw_base_points, 2)
             streak_bonus = round(streak_fn(points, result, opponent_streak) - points, 2)
-            upset_diff = opponent_pre_fight_ude - pre_fight_ude
-            upset_bonus = round(higher_rated_fn(points, result, upset_diff) - points, 2)
+
+            # Smoothed (trailing UPSET_RATING_WINDOW-fight average) rating
+            # for BOTH fighters, not the raw instantaneous pre-fight UDE
+            # snapshot -- see higher_rated_opponent_bonus docstring. Applied
+            # symmetrically to both sides of the gap: the opponent's rating
+            # is exactly as susceptible to single-fight whiplash as the
+            # fighter's own, so smoothing only one side would just relocate
+            # the artifact rather than remove it.
+            own_rating_for_upset = _trailing_rating_for_upset(fighter, pre_fight_ude)
+            opponent_rating_for_upset = _trailing_rating_for_upset(opponent, opponent_pre_fight_ude)
+            upset_diff = opponent_rating_for_upset - own_rating_for_upset
+            # higher_rated_fn (new tanh version) already applies perf_scale
+            # internally -- it must NOT be re-scaled by the combined_bonuses
+            # * perf_scale step below, or the performance coupling would be
+            # applied twice (quadratically damped instead of linearly).
+            upset_bonus = round(higher_rated_fn(points, result, upset_diff, perf_scale) - points, 2)
 
             df.at[index, f'performance_scaling_factor_{fighter_col}'] = perf_scale
             df.at[index, f'higher_rated_opponent_bonus_{fighter_col}'] = upset_bonus
+            df.at[index, f'upset_rating_gap_smoothed_{fighter_col}'] = round(upset_diff, 4)
 
-            combined_bonuses = t_def_bonus + streak_bonus + upset_bonus
+            combined_bonuses = t_def_bonus + streak_bonus
             scaled_bonuses = round(combined_bonuses * perf_scale, 2)
 
             # Invariant bonuses (not passed through perf_scale): opponent-age, own-age, rematch.
@@ -1017,7 +1076,9 @@ def calculate_ude_points_with_ablation(df, ablate=None, opponent_quality_k=OQ_DE
 
             # Summation: Base fight night points + scaled legacy/context bonuses + invariants
             # (Note: base fight night points already include dominance_fn adjustment)
-            points = points + scaled_bonuses + age_pts + own_age_pts + rematch_pts + opponent_quality_pts
+            # upset_bonus is added separately since higher_rated_fn already
+            # applied perf_scale internally (see note above).
+            points = points + scaled_bonuses + upset_bonus + age_pts + own_age_pts + rematch_pts + opponent_quality_pts
 
             # Bound the final point swing.
             points = max(-ABSOLUTE_SWING_CAP, min(ABSOLUTE_SWING_CAP, points))
@@ -1041,6 +1102,8 @@ def calculate_ude_points_with_ablation(df, ablate=None, opponent_quality_k=OQ_DE
             df.at[index, f'ude_points_post_fight_{fighter_col}'] = post_fight_ude
 
         fighter_ude_points.update(post_fight_updates)
+        for furl, new_rating in post_fight_updates.items():
+            fighter_rating_history[furl].append(new_rating)
 
         pair_key = tuple(sorted((fighter_1_url, fighter_2_url)))
         state = pair_history_cache.setdefault(
