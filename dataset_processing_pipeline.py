@@ -253,6 +253,49 @@ def convert_to_one_fight_one_row(df: pd.DataFrame) -> pd.DataFrame:
     return fight_df
 
 # ==============================================================================
+# 5b. Event-Date Join Integrity
+# ==============================================================================
+
+def drop_rows_with_null_event_date(df: pd.DataFrame, date_col: str = 'event_date',
+                                    id_cols: list = None, verbose: bool = True) -> pd.DataFrame:
+    """
+    Drops rows with a null event_date and reports exactly what was dropped,
+    rather than silently discarding them.
+
+    event_date isn't a minor missing-field gap like Height or DOB -- every
+    downstream stage (feature engineering's per-fighter chronological state
+    machines, UDE's temporal calibration) sorts and accumulates state by it,
+    so a null row can't be safely placed in time or processed at all.
+    validate_transformed_data's join-leakage check only monitors an aggregate
+    null *percentage* against a threshold, so a handful of null rows in a
+    large dataset can pass silently; this is a hard, unconditional drop
+    instead, specifically because there's no safe way to process such a row.
+
+    A null here almost always means the Event URL left-join in step 2 above
+    found no match in events_df -- typically a newly added event not yet
+    present in the events source, or a naming mismatch. Either way, it's
+    worth a human looking at (the event might be missing real data upstream,
+    not just this one row), not just discarding quietly.
+    """
+    if date_col not in df.columns:
+        return df
+
+    null_mask = df[date_col].isna()
+    n_dropped = int(null_mask.sum())
+    if n_dropped > 0:
+        if id_cols is None:
+            id_cols = [c for c in ['event_name', 'event_url', 'fight_url', 'bout',
+                                    'fighter_1', 'fighter_2', 'fighter_1_name', 'fighter_2_name']
+                       if c in df.columns]
+        if verbose:
+            print(f"WARNING: Dropping {n_dropped} row(s) with null '{date_col}' "
+                  f"(event-date join found no match) -- investigate the events source:")
+            print(df.loc[null_mask, id_cols].to_string(index=False))
+
+    return df.loc[~null_mask].reset_index(drop=True)
+
+
+# ==============================================================================
 # 6. ETL Pipeline validator
 # ==============================================================================
 def validate_transformed_data(df: pd.DataFrame, max_null_pct: float = 0.05, verbose: bool = True) -> None:
@@ -361,6 +404,11 @@ def run_etl_pipeline(
 
     # 3. Standardize column names
     df = standardize_columns(df, strike=True)
+
+    # 3b. Drop rows the event-date join above failed to match, before any
+    # further processing wastes work on rows that can't be safely placed in
+    # time anyway. See drop_rows_with_null_event_date's docstring.
+    df = drop_rows_with_null_event_date(df)
 
     # 4. Rearrange columns for row splitting
     # CHANGE: Explicit definition of the exact stats being split, fed directly into the splitter.
