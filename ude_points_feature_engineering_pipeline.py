@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 
 from ude_points_algorithm import quality_score as _quality_score_fn
+from dataset_processing_pipeline import drop_rows_with_null_event_date
 
 """## 1. Create is_title_bout column"""
 
@@ -43,7 +44,11 @@ def map_weight_class(weight_class):
         'Strawweight': 'SW'
     }
 
-    for class_name, code in weight_classes.items():
+    # Longest name first: 'Heavyweight' is a literal substring of 'Light
+    # Heavyweight', so a shorter name must never get a chance to match before
+    # a longer one that contains it. Sorting removes the dependency on dict
+    # insertion order (previously the only thing preventing a misclassification).
+    for class_name, code in sorted(weight_classes.items(), key=lambda kv: -len(kv[0])):
         if class_name in weight_class:
             return 'W' + code if 'Women' in weight_class else code
 
@@ -620,6 +625,39 @@ def add_dominance_columns(df):
     }
     return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
+def _dominance_magnitude(landed_for, landed_against, count_threshold, prop_threshold,
+                          count_width=0.10, prop_width=0.05):
+    """
+    Magnitude for a landed-count phase (takedowns, submission attempts):
+    blends a "close" curve (capped at 0.35) and a "decisive" curve (starting
+    at 0.36) by a continuous decisive_weight in [0, 1], instead of switching
+    between them at a hard (count > count_threshold and proportion >=
+    prop_threshold) gate. decisive_weight is a soft AND (product of two
+    sigmoids, one per condition), so it only approaches 1 when BOTH the
+    count and the proportion clear their threshold.
+
+    count_width is deliberately tight (0.10): landed counts are integers, so
+    there's nothing to interpolate between them -- a tight width preserves
+    the original intent that 1-3 landed (whatever the proportion) stays
+    capped near 0.35, rather than smoothing that protection away. The actual
+    value this function adds over the old hard gate is in the proportion
+    dimension (genuinely continuous) and in removing the 0.35/0.36 value gap
+    that existed at the boundary even for infinitesimally close inputs.
+    """
+    diff = landed_for - landed_against
+    total = landed_for + landed_against + 1e-5
+    proportion = landed_for / total if total > 1e-5 else 0.5
+
+    close = min(0.35, 0.10 + (diff / max(1, landed_for)) * 0.25)
+    decisive = min(1.0, 0.36 + (diff / total) * 0.64)
+
+    count_w = 1.0 / (1.0 + np.exp(-(landed_for - count_threshold) / count_width))
+    prop_w = 1.0 / (1.0 + np.exp(-(proportion - prop_threshold) / prop_width))
+    decisive_weight = count_w * prop_w
+
+    return (1.0 - decisive_weight) * close + decisive_weight * decisive
+
+
 def calculate_phase_magnitude_and_pdi(row, phases):
     STRIKING_VOLUME_FLOOR = 15
 
@@ -644,29 +682,22 @@ def calculate_phase_magnitude_and_pdi(row, phases):
 
     td_landed_1 = _to_num(row.get('td_landed_fighter_1', 0))
     td_landed_2 = _to_num(row.get('td_landed_fighter_2', 0))
-    td_diff_1 = td_landed_1 - td_landed_2
-    td_tot_1 = td_landed_1 + td_landed_2 + 1e-5
-    proportion_1 = td_landed_1 / td_tot_1 if td_tot_1 > 1e-5 else 0.5
 
     if td_landed_1 > td_landed_2:
-        td_mag = min(1.0, 0.36 + (td_diff_1 / td_tot_1) * 0.64) if (td_landed_1 > 3 and proportion_1 >= 0.80) else min(0.35, 0.10 + (td_diff_1 / max(1, td_landed_1)) * 0.25)
+        td_mag = _dominance_magnitude(td_landed_1, td_landed_2, count_threshold=3.5, prop_threshold=0.80)
     elif td_landed_2 > td_landed_1:
-        proportion_2 = td_landed_2 / td_tot_1
-        td_mag = max(-1.0, -0.36 - (abs(td_diff_1) / td_tot_1) * 0.64) if (td_landed_2 > 3 and proportion_2 >= 0.80) else max(-0.35, -0.10 - (abs(td_diff_1) / max(1, td_landed_2)) * 0.25)
+        td_mag = -_dominance_magnitude(td_landed_2, td_landed_1, count_threshold=3.5, prop_threshold=0.80)
     else:
         td_mag = 0.0
 
     sub_att_1 = _to_num(row.get('sub_att_fighter_1', 0))
     sub_att_2 = _to_num(row.get('sub_att_fighter_2', 0))
     sub_diff_1 = sub_att_1 - sub_att_2
-    sub_tot_1 = sub_att_1 + sub_att_2 + 1e-5
-    sub_prop_1 = sub_att_1 / sub_tot_1 if sub_tot_1 > 1e-5 else 0.5
 
     if sub_att_1 > sub_att_2:
-        sub_mag = min(1.0, 0.36 + (sub_diff_1 / sub_tot_1) * 0.64) if (sub_att_1 > 2 and sub_prop_1 >= 0.75) else min(0.35, 0.10 + (sub_diff_1 / max(1, sub_att_1)) * 0.25)
+        sub_mag = _dominance_magnitude(sub_att_1, sub_att_2, count_threshold=2.5, prop_threshold=0.75)
     elif sub_att_2 > sub_att_1:
-        sub_prop_2 = sub_att_2 / sub_tot_1
-        sub_mag = max(-1.0, -0.36 - (abs(sub_diff_1) / sub_tot_1) * 0.64) if (sub_att_2 > 2 and sub_prop_2 >= 0.75) else max(-0.35, -0.10 - (abs(sub_diff_1) / max(1, sub_att_2)) * 0.25)
+        sub_mag = -_dominance_magnitude(sub_att_2, sub_att_1, count_threshold=2.5, prop_threshold=0.75)
     else:
         sub_mag = 0.0
 
@@ -921,8 +952,36 @@ def engineer_all_features(
 
     if 'event_date' in df.columns:
         df['event_date'] = pd.to_datetime(df['event_date'])
+        # Safety net: dataset_processing_pipeline.run_etl_pipeline already
+        # drops+reports null event_date rows at the source (the event-date
+        # join). Re-checking here too in case this df didn't come through
+        # that path -- every chronological state machine below assumes a
+        # valid, sortable date on every row.
+        df = drop_rows_with_null_event_date(df)
 
     df = df.sort_values(by='event_date', ascending=True).reset_index(drop=True)
+
+    # Defensive NaN guard for the raw landed/attempted stat columns consumed
+    # by update_career_means, add_dynamic_strike_accuracy/defence, and
+    # add_dynamic_td_accuracy/defence: each accumulates a running per-fighter
+    # total via `+=` with no NaN check, so a single NaN input would silently
+    # poison that fighter's cumulative total -- and every derived column for
+    # them -- to NaN for the remainder of their career. Not currently
+    # triggered (verified zero NaN across these columns in the live dataset)
+    # but unguarded, and the failure mode is exactly the shape of this
+    # project's one confirmed bug class (a silent, cascading NaN). Filling
+    # to 0 here matches _to_num's existing NaN-as-0 convention used in
+    # calculate_phase_magnitude_and_pdi below.
+    _cumulative_stat_cols = [
+        f'{stat}_fighter_{side}'
+        for stat in ('sig_strikes_landed', 'sig_strikes_attempted', 'td_landed', 'td_attempted',
+                     'head_strikes_landed', 'head_strikes_attempted',
+                     'body_strikes_landed', 'body_strikes_attempted',
+                     'leg_strikes_landed', 'leg_strikes_attempted')
+        for side in (1, 2)
+    ]
+    present = [c for c in _cumulative_stat_cols if c in df.columns]
+    df[present] = df[present].fillna(0)
 
     # 1. Title bout column
     df = create_is_title_bout_column(df)
@@ -962,11 +1021,14 @@ def engineer_all_features(
     df = add_dynamic_td_accuracy(df)
     df = add_dynamic_td_defence(df)
 
-    # 9. Time calculations & per-minute rates
-    df = add_time_and_per_min_features(df)
-
-    # 10. Standing significant strikes
+    # 9. Standing significant strikes (must run before per-minute rates below,
+    # which scan df.columns for every *_landed/*_attempted column still
+    # present -- standing_sig_strikes_landed_per_min would otherwise silently
+    # never get generated since its source column wouldn't exist yet)
     df = add_standing_sig_strikes_columns(df)
+
+    # 10. Time calculations & per-minute rates
+    df = add_time_and_per_min_features(df)
 
     # 11. Differentials & Dominance Features
     df = process_dominance_differentials(df)
