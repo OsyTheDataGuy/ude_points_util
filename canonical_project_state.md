@@ -54,25 +54,25 @@ Per fighter-side, per fight, in order: `raw_base_points` (±3 W/L) → `champion
 
 | Rank | Fighter | Record | Fights | Career Gain | Shrunk Rate |
 |---|---|---|---|---|---|
-| 1 | Georges St-Pierre | 20-2-0 | 22 | 154.7 | 4.425 |
-| 2 | Jon Jones | 22-1-0 | 24 | 158.3 | 4.270 |
-| 3 | Islam Makhachev | 18-1-0 | 19 | 110.9 | 3.372 |
-| 4 | Demetrious Johnson | 15-2-1 | 18 | 89.0 | 2.710 |
+| 1 | Georges St-Pierre | 20-2-0 | 22 | 154.8 | 4.428 |
+| 2 | Jon Jones | 22-1-0 | 24 | 158.4 | 4.275 |
+| 3 | Islam Makhachev | 18-1-0 | 19 | 110.9 | 3.373 |
+| 4 | Demetrious Johnson | 15-2-1 | 18 | 89.0 | 2.712 |
 | 5 | Amanda Nunes | 16-2-0 | 18 | 82.9 | 2.495 |
-| 6 | Valentina Shevchenko | 15-3-1 | 19 | 81.5 | 2.358 |
-| 7 | Khabib Nurmagomedov | 13-0-0 | 13 | 67.2 | 2.352 |
+| 6 | Valentina Shevchenko | 15-3-1 | 19 | 81.2 | 2.350 |
+| 7 | Khabib Nurmagomedov | 13-0-0 | 13 | 67.0 | 2.343 |
 | 8 | Alexander Volkanovski | 15-3-0 | 18 | 76.0 | 2.247 |
-| 9 | Justin Gaethje | 11-5-0 | 16 | 57.2 | 1.697 |
-| 10 | Merab Dvalishvili | 14-3-0 | 17 | 56.5 | 1.608 |
-| 11 | Dricus Du Plessis | 10-1-0 | 11 | 44.5 | 1.496 |
-| 12 | Daniel Cormier | 11-3-0 | 15 | 50.0 | 1.477 |
+| 9 | Justin Gaethje | 11-5-0 | 16 | 57.1 | 1.693 |
+| 10 | Merab Dvalishvili | 14-3-0 | 17 | 56.4 | 1.605 |
+| 11 | Dricus Du Plessis | 10-1-0 | 11 | 44.5 | 1.494 |
+| 12 | Daniel Cormier | 11-3-0 | 15 | 50.0 | 1.476 |
 | 13 | Ilia Topuria | 9-1-0 | 10 | 42.5 | 1.473 |
-| 14 | Francis Ngannou | 12-2-0 | 14 | 46.3 | 1.383 |
-| 15 | Alex Pereira | 10-3-0 | 13 | 44.1 | 1.348 |
-| 16 | Alexandre Pantoja | 14-4-0 | 18 | 49.5 | 1.301 |
-| 17 | Movsar Evloev | 10-0-0 | 10 | 38.8 | 1.286 |
+| 14 | Francis Ngannou | 12-2-0 | 14 | 46.4 | 1.390 |
+| 15 | Alex Pereira | 10-3-0 | 13 | 44.0 | 1.345 |
+| 16 | Alexandre Pantoja | 14-4-0 | 18 | 49.5 | 1.300 |
+| 17 | Movsar Evloev | 10-0-0 | 10 | 38.9 | 1.290 |
 | 18 | Aljamain Sterling | 18-5-0 | 23 | 54.0 | 1.239 |
-| 19 | Benson Henderson | 11-3-0 | 14 | 42.6 | 1.230 |
+| 19 | Benson Henderson | 11-3-0 | 14 | 42.7 | 1.232 |
 | 20 | Petr Yan | 12-4-0 | 16 | 44.6 | 1.214 |
 
 619 fighters clear the `n_fights >= 10` floor. Topuria, Evloev, Dricus Du Plessis, and Alex Pereira sit closest to it (10–13 fights).
@@ -94,6 +94,18 @@ fighter_2
 ```
 This naming convention is strictly enforced across utility transformations. `ude_points_utils.extract_fighter_details_programmatically`/`extract_opponent_details_programmatically` discover columns generically by substring match on `fighter_1`/`fighter_2` — any new `<metric>_fighter_1`/`_fighter_2` column is automatically picked up by `create_fighter_career_dataset` with no utils changes needed.
 
+### `ude_points_feature_engineering_pipeline.py` — PDI computation
+
+`pdi_margin` (the single input driving `dominance_adjustment`, `perf_scale`, and the method×PDI residual, all at once) is built in `calculate_phase_magnitude_and_pdi` from five phase magnitudes: striking, control time, takedowns, submission attempts, knockdowns. Takedown and submission magnitude use `_dominance_magnitude`, a smooth blend (soft-AND of two sigmoids, over landed-count and proportion-of-total-landed) between a "close" curve (capped 0.35) and a "decisive" curve (0.36+) — replacing a hard `count > N and proportion >= P` gate that produced a real value-gap at the boundary. Landed counts are integers, so the count-axis width (`count_width=0.10`) is deliberately tight: low counts (1-3 landed) stay within ~0.004 of their old capped value, preserving the original small-sample protection; the actual smoothing benefit is in the proportion axis (genuinely continuous) and in closing the 0.35→0.36 value-gap itself.
+
+`map_weight_class` classifies by substring containment on the raw weight-class string, checked longest-name-first — required because `"Heavyweight"` is a literal substring of `"Light Heavyweight"`; matching shortest-first (or dict insertion order) would misclassify.
+
+Two computed-but-unconsumed-by-scoring pathways are retained deliberately, not dead code: `who_won_*`/`dominant_fighter`/`phases_won` (categorical phase-win detection, for narrative/visualization use), and `rematch_column`/`is_rematch` (0-indexed meeting count per fighter pair — 0=first meeting, 1=first rematch, 2=second rematch, etc. — for visualization; `ude_points_algorithm.py`'s own `rematch_adjustment` tracks pair history incrementally during scoring instead of reading these columns).
+
+`engineer_all_features` runs `add_standing_sig_strikes_columns` before `add_time_and_per_min_features` (not after) — the latter scans `df.columns` for every `*_landed`/`*_attempted` column present *at that point* to generate a per-minute variant, so `standing_sig_strikes_landed_per_min_*` would silently never be generated if its source column didn't exist yet. The raw landed/attempted stat columns consumed by the cumulative-sum trackers (`update_career_means`, `add_dynamic_strike_accuracy`/`_defence`, `add_dynamic_td_accuracy`/`_defence`) are `fillna(0)`'d once at the top of `engineer_all_features`, before any of those trackers run — each accumulates via unchecked `+=`, so a single NaN would otherwise poison that fighter's running total (and every derived column built from it) for the rest of their career; zero NaN currently present in these columns, so this is a defensive guard, not a live fix.
+
+**Column hygiene:** `v2_6.csv` is rebuilt end-to-end from its 75 genuinely-raw columns on every regeneration — `engineer_all_features` → `calculate_ude_points_with_ablation` → `add_ude_points_difference_columns` — not patched incrementally. The feature-engineering functions add columns via `pd.concat`, which silently creates a duplicate-named column (not an overwrite) if the input already contains that name; re-running any stage against an already-processed file reintroduces exactly this. Full column accounting verified empirically (not by manual enumeration): 75 raw → 151 feature-engineering-derived → 28 UDE-scoring-derived → 2 diff columns = 256 total, zero duplicates at every stage.
+
 ---
 
 ## 4. Career Trajectories & Utilities
@@ -111,8 +123,8 @@ ranking / historical analysis / visualization
 
 **v2.6 is locked as production** (System Integrity 9.5/10, Theoretical Alignment 9/10 — see audit history). These are candidate directions for a future v3, not scheduled work:
 
-1. **Era/division-strength normalization.** Nothing in the current architecture accounts for how strong the competition was in a given era or weight class — a title run in a shallow field scores identically to one in a stacked one. This is the largest gap against the project's own primary goal (GOAT status) and the most likely point of public/critical pushback. See §6 below for feasibility.
-2. **Extend empirical calibration to the remaining hand-tuned constants.** Age and method×PDI are data-fit; `dominance_adjustment`'s anchors, `perf_scale`'s pivot, `title_defense_bonus`'s saturation curve, and the upset-bonus gap/scale are still hand-picked. Fitting those the same way would close the gap and would likely surface any remaining instances of this project's one confirmed bug class (a neutral/fallback state silently resolving to a clip boundary instead of a true no-op) before they ship.
+1. **Era/division-strength normalization.** Nothing in the current architecture accounts for how strong the competition was in a given era or weight class — a title run in a shallow field scores identically to one in a stacked one. This is the largest gap against the project's own primary goal (GOAT status) and the most likely point of public/critical pushback. **Feasibility already assessed — see §6, don't redo from scratch.** Re-derive against the then-current dataset before acting on it, though: §6's numbers (874/2,544 bridge fighters, per-division roster sizes, 0% stat-coverage gaps) will have shifted by the time this is picked up, and could change the feasibility verdict.
+2. **Extend empirical calibration to the remaining hand-tuned constants.** Age and method×PDI are data-fit; `dominance_adjustment`'s anchors, `perf_scale`'s pivot, `title_defense_bonus`'s saturation curve, and the upset-bonus gap/scale are still hand-picked — as are `_dominance_magnitude`'s own thresholds/widths (§3), even after its hard-cliff fix. Fitting those the same way would close the gap and would likely surface any remaining instances of this project's one confirmed bug class (a neutral/fallback state silently resolving to a clip boundary instead of a true no-op) before they ship. Note: the *cliff* in PDI's takedown/submission magnitude specifically is already fixed (§3) — this item is about the still-hand-picked constants generally, not a repeat of that.
 3. **Decouple `perf_scale` from `dominance_adjustment`** (lower priority) — once a genuinely non-PDI-derived signal exists to drive `perf_scale`. Not worth forcing before then; see §2's "Accepted tradeoffs."
 
 ---
@@ -134,16 +146,21 @@ Net: buildable, and the data supports a first version — but it's a v3-scale pr
 ---
 
 ## 7. Current Source Files
+
+**Pipeline order:** `dataset_processing_pipeline.py` (raw scrape → 1-row-per-fight) → `ude_points_feature_engineering_pipeline.py` (→ PDI/chronological features) → `ude_points_algorithm.py` (→ UDE points) → `ude_points_utils.py` (→ rankings/career views).
+
+* ```text dataset_processing_pipeline.py ``` — ETL: merges raw scraped fight/event/fighter-bio data into one row per fight (`run_etl_pipeline`). Drops and reports (does not silently discard) any row where the `event_date` join finds no matching event — `drop_rows_with_null_event_date`, called right after column standardization. `ude_points_feature_engineering_pipeline.engineer_all_features` calls the same function again defensively at its own entry point, in case its input didn't come through this ETL step.
+
+* ```text fights_up_to_islam_garry_ready_for_features.csv ``` — Output of `run_etl_pipeline`; input to `engineer_all_features`. 75 raw columns. Verified: running the full pipeline (`engineer_all_features` → `calculate_ude_points_with_ablation` → `add_ude_points_difference_columns`) on this file reproduces `v2_6.csv` bit-for-bit (same 8,564 fight URLs, zero difference in any UDE point) — confirms the pipeline is fully reproducible from genuinely raw data, not just self-consistent under incremental patching.
+
 * ```text ude_points_algorithm.py ``` — Authoritative UDE scoring implementation.
 
 * ```text ude_points_feature_engineering_pipeline.py ``` — Generates chronological state and PDI fight-performance features.
 
 * ```text ude_points_utils.py ``` — Handles peak, career, shrunk-rate rankings, and career dataset conversions.
 
-* ```text latest_fights_up_to_islam_garry_with_ude_points_calculated_v2_6 ``` — **Current** main historical fight dataset with calculated UDE points. Reflects the full scoring mechanics in §2.
+* ```text latest_fights_up_to_islam_garry_with_ude_points_calculated_v2_6 ``` — **Current** main historical fight dataset with calculated UDE points. 8,564 fights × 256 columns. Reflects the full scoring mechanics in §2, rebuilt end-to-end from raw columns per §3's "Column hygiene" note — not an incrementally patched file.
 
 * ```text latest_fights_up_to_islam_garry_with_ude_points_calculated_v2_5 ``` — Superseded by v2_6. Retained, not deleted, as a pre-fix historical snapshot.
-
-* ```text all_fights_data_processed_engineered_and_ready_for_ude_points ``` — Pre-scored feature-engineered dataset.
 
 * ```text project_history.md ``` — Chronological record of how the current state was reached; not required reading to continue the project.
