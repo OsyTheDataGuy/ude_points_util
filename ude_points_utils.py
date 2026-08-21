@@ -704,14 +704,14 @@ def rank_fighters_by_peak_ude_points(df):
     return fighter_max_ude_points_sorted[['fighter', 'fighter_url', 'age_at_peak_ude_points', 'post_fight_record', 'ude_points_post_fight', 'rank']]
  
 '''6. Functions to ranking by Ude points (rank by shrunk career points-per-fight rate)'''
-def rank_fighters_by_shrunk_ude_rate(df, prior_strength=10.0):
+def rank_fighters_by_shrunk_ude_rate(df, prior_strength=10.0, min_fights=None):
     """
     Rank fighters by career UDE points earned PER FIGHT, shrunk toward the
     population mean rate via Bayesian shrinkage -- the same pattern used by
     shrunk_win_rate() in ude_points_algorithm.py (there with a strength-5
     prior toward a .500 win rate; here with a strength-10 prior toward the
     population's mean per-fight rate).
- 
+
     Why this exists: rank_fighters_by_latest_ude_points() and
     rank_fighters_by_peak_ude_points() both rank on a cumulative career sum
     that starts at 500 and never decays or normalizes by fight count. That
@@ -725,13 +725,31 @@ def rank_fighters_by_shrunk_ude_rate(df, prior_strength=10.0):
     fighter generate ON AVERAGE per fight, with small career sample sizes
     (e.g. a fighter with 3-4 UFC fights) pulled toward the mean rather than
     let a tiny denominator produce an inflated or deflated rate.
- 
+
+    Bayesian shrinkage alone is not sufficient stabilization at very small n:
+    a prior_strength strong enough to tame a 3-4 fight outlier also distorts
+    everyone else's rate, and even a heavy shrink can leave an extreme-enough
+    raw rate (e.g. a career built on stacked title-bout bonuses) ranked far
+    higher than a 3-4 fight sample supports -- rank became highly unstable
+    under small perturbations of prior_strength in exactly these cases.
+    `min_fights` is a separate, direct floor for exactly that failure mode:
+    fighters below it are excluded before ranking, rather than relying on
+    the prior to argue them out of contention.
+
     Args:
     - df (pd.DataFrame): The scored fight dataset (post ude_points_algorithm).
     - prior_strength (float): Bayesian shrinkage prior strength, in
       equivalent number of fights. Default 10.0, consistent with the
       project's existing shrinkage convention.
- 
+    - min_fights (int or None): If set, fighters with fewer than this many
+      scored fights are excluded before ranking. `rank` is then dense-ranked
+      within the qualifying subset only (not the full population), so a
+      returned rank of 1 is the best fighter who clears the floor.
+      `population_mean_rate` (and therefore `shrunk_rate` for everyone who
+      does qualify) is still computed from the FULL, unfiltered population --
+      excluding sparse careers from the prior itself would bias the shrinkage
+      target for everyone else.
+
     Returns:
     - pd.DataFrame with columns: fighter, fighter_url, age, record, n_fights,
       career_point_gain, raw_rate, shrunk_rate, rank. Sorted descending by
@@ -743,33 +761,38 @@ def rank_fighters_by_shrunk_ude_rate(df, prior_strength=10.0):
     ude_points_df = pd.DataFrame.from_dict(latest_ude_points, orient='index')
     ude_points_df.reset_index(inplace=True)
     ude_points_df.rename(columns={'index': 'fighter_url'}, inplace=True)
- 
+
     # Career point gain relative to the fixed starting value of 500.
     STARTING_UDE_POINTS = 500.0
     ude_points_df['career_point_gain'] = ude_points_df['latest_ude_points'] - STARTING_UDE_POINTS
- 
+
     # Count total scored fights per fighter_url from both sides of the dataset.
     fighter_1_urls = df[['fighter_url_fighter_1']].rename(columns={'fighter_url_fighter_1': 'fighter_url'})
     fighter_2_urls = df[['fighter_url_fighter_2']].rename(columns={'fighter_url_fighter_2': 'fighter_url'})
     fight_counts = pd.concat([fighter_1_urls, fighter_2_urls]).groupby('fighter_url').size()
     fight_counts.name = 'n_fights'
- 
+
     ude_points_df = ude_points_df.merge(fight_counts, left_on='fighter_url', right_index=True, how='left')
- 
+
     # Raw (unshrunk) per-fight rate.
     ude_points_df['raw_rate'] = ude_points_df['career_point_gain'] / ude_points_df['n_fights']
- 
+
     # Bayesian shrinkage toward the population mean rate, weighted by prior_strength
     # equivalent fights -- identical in form to shrunk_win_rate()'s treatment of
     # win rate, just applied to points-per-fight instead of wins-per-fight.
+    # Computed over the FULL population, before any min_fights filtering, so
+    # the shrinkage target itself isn't biased by which careers get excluded.
     population_mean_rate = ude_points_df['raw_rate'].mean()
     ude_points_df['shrunk_rate'] = (
         (ude_points_df['career_point_gain'] + prior_strength * population_mean_rate)
         / (ude_points_df['n_fights'] + prior_strength)
     )
- 
+
+    if min_fights is not None:
+        ude_points_df = ude_points_df[ude_points_df['n_fights'] >= min_fights]
+
     ude_points_df = ude_points_df.sort_values(by='shrunk_rate', ascending=False).reset_index(drop=True)
     ude_points_df['rank'] = ude_points_df['shrunk_rate'].rank(method='dense', ascending=False).astype(int)
- 
+
     return ude_points_df[['fighter', 'fighter_url', 'age', 'record', 'n_fights',
                            'career_point_gain', 'raw_rate', 'shrunk_rate', 'rank']]
