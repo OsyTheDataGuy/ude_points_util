@@ -1,29 +1,43 @@
 """
-UDE Points — Rebuilt Temporal-Calibrated Algorithm
+UDE Points — Temporal-Calibrated UFC Fighter Scoring
 
-This version separates empirical calibration from fight-time scoring.
+Scores each fighter-side of each fight into a running UDE rating (starting at
+500). Calibration (age-decline curve, method x PDI residual) is fit
+separately from scoring: production callers pass frozen calibration objects
+learned only from data available by their declared cutoff date;
+calculate_ude_points_with_ablation() builds a temporal calibration cache
+itself when none is supplied, so a fight at time T only ever scores against
+parameters learned from fights strictly before T.
 
-Production scoring MUST receive frozen age and method×PDI calibration objects.
-The scorer does not re-estimate either calibration from the full scoring dataset.
-The supplied calibrations are intended to have been learned only from information
-available by their declared cutoff date.
+Per-fight scoring components, applied in order (see calculate_ude_points_with_ablation):
+1. Base result: +/-3 points for W/L, 0 for a draw/no-contest.
+2. Championship bonus: 2.0x on title bouts (win or loss).
+3. Multi-division bonus: 1.25x for winning a title in a new weight class.
+4. Dominance adjustment: continuous PDI-margin-driven multiplier (0.75x-1.30x).
+5. Method x PDI residual: small calibrated bonus/penalty for method of
+   victory, UD as the reference method (+/-0.75 cap).
+6. Title-defense and streak bonuses: each computed off the raw base result
+   (not the multiplied total), summed, then jointly scaled by perf_scale.
+7. Higher-rated-opponent bonus: additive upset bonus from a smoothed
+   trailing rating gap, perf_scale applied internally.
+8. Age adjustment (opponent's age, opposition-quality discount) and own-age
+   adjustment (fighter's own age, achievement reward) — both empirically
+   calibrated, invariant (not perf_scale-scaled).
+9. Rematch/revenge adjustment: multipliers for avenging a prior loss and for
+   rematch series depth.
+10. Opponent-quality adjustment: multiplier from the opponent's shrunk
+    pre-fight win rate, champion status, and title defenses.
 
-Core Adjustments & Bonuses:
-1. Base Result & Method: Dictionary lookup with fallback handling.
-2. Championship Bonus: Multiplicative scaling (2.0x / 1.25x).
-3. Title Defense Bonus: Compounding proportional multiplier using a saturating curve.
-4. Dominance Adjustment: Method-sensitive multiplicative interpolation driven by PDI margin.
-5. Streak Adjustment: Proportional multipliers for hot streaks and cold-streak penalties.
-6. Age Adjustment: Proportional multiplier applied across weight classes (threshold > 32).
-7. Own-Age Adjustment: Invariant bonus applied to a fighter winning past their prime.
-8. Rematch & Revenge: Multipliers for avenging prior losses and series depth.
-9. Higher-Rated Opponent Bonus: Additive upset bonus anchored to underdog win-probability drops.
+The final per-fight swing is clamped to +/-ABSOLUTE_SWING_CAP.
 """
 
+import logging
 from collections import defaultdict, deque
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
+
+logger = logging.getLogger(__name__)
 
 # Window (in fights) for the trailing rolling average used by
 # higher_rated_opponent_bonus's rating-gap calculation. See that function's
@@ -54,7 +68,8 @@ NO_SCORE_METHODS = {'DQ', 'Overturned'}
 def is_no_score_fight(result, method):
     return result in NO_SCORE_RESULTS or method in NO_SCORE_METHODS
 
-# Anchor points for the phases_won interpolation
+# Unused by the current scoring path (no phases_won interpolation is wired
+# in) -- kept in case that interpolation is reintroduced.
 TOTAL_PHASES = 5
 MIN_PHASES_FOR_DOMINANCE = 3
 PHASES_LOW_ANCHOR = 0.85   
@@ -88,11 +103,8 @@ def is_championship_fight_row(row):
     return row.get('is_championship', False)
 
 def championship_bonus(points, result, is_championship):
-    if is_championship:
-        if result == 'W':
-            return points * 2.0
-        elif result == 'L':
-            return points * 2.0
+    if is_championship and result in ('W', 'L'):
+        return points * 2.0
     return points
 
 def multi_division_championship_bonus(points, result, is_title_bout, fighter_url, weight_class, fighter_title_weight_classes):
@@ -341,22 +353,34 @@ def _age_multiplier(age, calibration, side, result):
         return 1.0
 
     reference_age = calibration['reference_age']
+    # calibration['reference_age'] is NaN under neutral calibration (see
+    # _neutral_age_calibration) -- comparisons against NaN are always False,
+    # so `age <= reference_age` would silently fail to short-circuit and let
+    # slope * NaN propagate into the multiplier. Must return early explicitly.
+    if pd.isna(reference_age):
+        return 1.0
     if age <= reference_age:
         return 1.0
 
     slope = calibration[f'{side}_post_slope']
     years_after_reference = float(age) - reference_age
 
-    # Logistic coefficient -> odds-ratio effect.  For UDE, preserve the
-    # existing interpretation: older opponents reduce win credit, while an
-    # older winner receives additional own-age credit.  Only the empirically
-    # supported post-reference decline is converted into the scoring curve.
-    effect = np.exp(abs(slope) * years_after_reference)
-
     if side == 'opponent':
+        # Opposition-quality discount: signed, so a declining opponent is
+        # worth less to beat and a worse loss to fall to -- whichever
+        # direction the calibration actually finds for opponent_post_slope.
+        effect = np.exp(slope * years_after_reference)
         multiplier = 1.0 / effect if result == 'W' else effect
         return float(max(AGE_MIN_MULTIPLIER, min(AGE_MAX_MULTIPLIER, multiplier)))
 
+    # Own side: an achievement-under-adversity reward, not an
+    # opposition-quality discount, so magnitude (not sign) scales the bonus --
+    # every other UDE component (higher_rated_opponent_bonus,
+    # opponent_quality_adjustment) already rewards clearing a harder bar with
+    # more credit, never less. The signed own_post_slope is negative
+    # (own-age win probability declines past the breakpoint); using it
+    # directly would shrink this bonus instead of rewarding it.
+    effect = np.exp(abs(slope) * years_after_reference)
     multiplier = effect if result == 'W' else 1.0
     return float(max(AGE_MIN_MULTIPLIER, min(AGE_MAX_MULTIPLIER, multiplier)))
 
@@ -366,18 +390,30 @@ def age_adjustment(points, result, opponent_age, weight_class, calibration):
     return round(points * multiplier, 2)
 
 
-# def own_age_adjustment(points, result, fighter_age, weight_class, calibration):
-#     multiplier = _age_multiplier(fighter_age, calibration, 'own', result)
-#     return round(points * multiplier, 2)
-# gate own_age_adjustment by opponent_age so we don't reward aging fighters for beating older fighters past their prime
+OWN_AGE_GATE_WIDTH_YEARS = 3.0
+
+def _own_age_gate_scale(opponent_age, reference_age, width=OWN_AGE_GATE_WIDTH_YEARS):
+    """
+    Smooth replacement for a hard opponent_age > reference_age cutoff: 1.0
+    well below reference_age (full credit), 0.5 exactly at reference_age,
+    ->0.0 well above it (fully gated). Avoids a discontinuous jump in the
+    fighter's own-age bonus from a marginal, sub-year change in opponent age.
+    """
+    if pd.isna(opponent_age) or pd.isna(reference_age):
+        return 0.0
+    return float(1.0 / (1.0 + np.exp((float(opponent_age) - float(reference_age)) / width)))
+
 def own_age_adjustment(points, result, fighter_age, opponent_age, weight_class, calibration):
-    # Structural Gate: The own-age bonus is strictly conditional on defeating an 
-    # opponent who is at or below the reference age. 
+    # Gated by opponent age so a fighter isn't rewarded for beating another
+    # fighter who is also past their prime -- gate_scale (see
+    # _own_age_gate_scale) scales continuously rather than gating on/off.
     if result == 'W':
         reference_age = calibration['reference_age']
-        if pd.isna(opponent_age) or opponent_age > reference_age:
-            return round(points, 2) # Nullifies the bonus, equivalent to multiplier = 1.0
-            
+        gate_scale = _own_age_gate_scale(opponent_age, reference_age)
+        raw_multiplier = _age_multiplier(fighter_age, calibration, 'own', result)
+        multiplier = 1.0 + (raw_multiplier - 1.0) * gate_scale
+        return round(points * multiplier, 2)
+
     multiplier = _age_multiplier(fighter_age, calibration, 'own', result)
     return round(points * multiplier, 2)
     
@@ -461,11 +497,10 @@ def _interpolate_dominance_multiplier(t, high_anchor, low_anchor):
     else:
         return 1.0 + t * (1.0 - low_anchor)
 
-def dominance_adjustment(points, fighter_name, opponent_name, result, method_mapped,
-                          dominant_fighter, pdi_margin=None):
+def dominance_adjustment(points, fighter_name, opponent_name, result, dominant_fighter, pdi_margin=None):
     """
     Method-neutral continuous PDI adjustment. Method is handled separately by
-    the empirically calibrated method_x_pdi residual.
+    the empirically calibrated method_x_pdi residual (see method_pdi_residual_points).
     """
     if result not in ('W', 'L'):
         return points
@@ -488,39 +523,32 @@ def dominance_adjustment(points, fighter_name, opponent_name, result, method_map
     multiplier = _interpolate_dominance_multiplier(t, high_anchor, low_anchor)
     return round(points * multiplier, 2)
 
-HIGHER_RATED_GAP_FLOOR = 15.0     # gaps below this earn zero bonus/penalty
+HIGHER_RATED_GAP_FLOOR = 15.0     # rating gaps at/under this earn zero bonus/penalty
 HIGHER_RATED_GAP_SCALE = 30.0     # controls how quickly tanh approaches its asymptote
-HIGHER_RATED_MAX_MAGNITUDE = 9.0  # asymptotic cap, replaces the old diff>=60 tier
+HIGHER_RATED_MAX_MAGNITUDE = 9.0  # asymptotic cap on the bonus/penalty magnitude
 
 def higher_rated_opponent_bonus(points, result, diff, perf_scale=1.0):
     """
-    Smooth, bounded replacement for the old discrete diff>=30/40/50/60 step
-    function. Both branches are continuous in `diff`, are exactly 0 for
-    gaps at/under HIGHER_RATED_GAP_FLOOR, and asymptotically saturate at
-    +/- HIGHER_RATED_MAX_MAGNITUDE via tanh (never exceeding it, unlike the
-    old open-ended `diff >= 60 -> +9` tier which had no upper bound on diff
-    itself even though the payout was flat past 60).
+    Additive upset bonus/penalty from a rating gap, continuous and bounded:
+    zero at/under HIGHER_RATED_GAP_FLOOR, saturating toward
+    +/-HIGHER_RATED_MAX_MAGNITUDE via tanh as the gap widens.
 
-    Performance coupling: the raw tanh magnitude is scaled by `perf_scale`
-    before being added, so a rating-gap bonus/penalty is damped when the
-    underlying in-fight performance (PDI-derived) was not itself decisive,
-    and preserved at full strength when it was. This mirrors how
-    scaled_bonuses already treats title-defense and streak bonuses --
-    upset bonus is computed and returned pre-scaled here so it must NOT be
-    passed through the combined_bonuses * perf_scale step a second time at
-    the call site.
+    The tanh magnitude is scaled by `perf_scale` before being added, so the
+    bonus/penalty is damped when the underlying in-fight performance
+    (PDI-derived) wasn't itself decisive, full strength when it was. Because
+    perf_scale is applied here internally, the caller must add this bonus
+    directly and must NOT also multiply it by perf_scale again (that would
+    double-apply the performance coupling).
 
-    `diff` is expected to already be a SMOOTHED rating gap (trailing
-    UPSET_RATING_WINDOW-fight average for both fighters, computed by the
-    caller -- see _trailing_rating_for_upset below), not the raw
-    instantaneous pre-fight UDE difference. UDE's own point ledger is
-    self-referential and can jump 10+ points off a single fight
-    (championship 2x, dominance, upset bonus all stacking); using the
-    literal snapshot as an "how much of an underdog was I" proxy makes the
-    very next fight's upset gap mechanically shrink or inflate based on
-    scoring-order artifacts rather than a fighter's actual standing. The
-    trailing average keeps the underdog signal this function exists to
-    capture while damping that single-fight whiplash.
+    `diff` must be a SMOOTHED rating gap (trailing UPSET_RATING_WINDOW-fight
+    average for both fighters -- see _trailing_rating_for_upset), not the raw
+    instantaneous pre-fight UDE difference. UDE's ledger is self-referential
+    and can jump 10+ points off a single fight (championship 2x, dominance,
+    this bonus itself all stacking), so using the literal snapshot as an
+    underdog-ness proxy would make the very next fight's gap mechanically
+    shrink or inflate from scoring-order artifacts rather than a fighter's
+    actual standing. The trailing average keeps the underdog signal while
+    damping that single-fight whiplash.
     """
     if result == 'W' and diff > 0:
         raw_bonus = HIGHER_RATED_MAX_MAGNITUDE * np.tanh(
@@ -758,6 +786,9 @@ def calibrate_method_pdi_effects(df, cutoff_date=None, cutoff_year=None, strict_
     base_cols = cols
     for i, r in x.iterrows():
         common = r.copy()
+        # make_row (unused below) would rebuild a full design-matrix row per
+        # method and re-predict; the contrast is computed directly from the
+        # fitted coefficients instead, which is equivalent and cheaper.
         def make_row(method):
             rr = common.copy()
             rr['method']=method
@@ -767,7 +798,6 @@ def calibrate_method_pdi_effects(df, cutoff_date=None, cutoff_year=None, strict_
             rr['SD_x_pdi']=rr['method_SD']*rr['pdi_margin']
             rr['method_UD']=float(method=='UD')
             return rr
-        # easier: construct using model coefficients directly; method-only contrast
         b=model.params
         # linear predictor contrast method - UD
         contrasts={
@@ -884,15 +914,35 @@ def _neutral_method_pdi_calibration(reason='insufficient_prior_history'):
         'calibration_reason': reason,
     }
 
+CALIBRATION_ROLLING_WINDOW_YEARS = 5
+CALIBRATION_MIN_FIGHT_OBSERVATIONS = 1000
+
+
 def _build_temporal_calibration_cache(df):
-    """Build calibrations using only data strictly before each calendar year."""
+    """Build calibrations using a trailing rolling window of fight history.
+
+    Each calendar year's calibration uses only fights strictly before that
+    year's cutoff, drawn from a trailing CALIBRATION_ROLLING_WINDOW_YEARS-year
+    window rather than the full expanding history. This keeps age-decline and
+    method x PDI curves reflective of the contemporary era instead of being
+    dragged toward legacy-era rule/scoring noise as history accumulates.
+
+    If the rolling window does not contain at least
+    CALIBRATION_MIN_FIGHT_OBSERVATIONS fights (early years, before enough
+    rolling history exists), the window falls back to the full expanding
+    history so the fit still has adequate statistical power.
+    """
     d = df.sort_values('event_date').copy()
     d['event_date'] = pd.to_datetime(d['event_date'])
     years = sorted(d['event_date'].dt.year.unique())
     cache = {}
     for year in years:
         cutoff = pd.Timestamp(f'{int(year)}-01-01')
-        prior = d[d['event_date'] < cutoff]
+        window_start = cutoff - pd.DateOffset(years=CALIBRATION_ROLLING_WINDOW_YEARS)
+        prior = d[(d['event_date'] < cutoff) & (d['event_date'] >= window_start)]
+
+        if len(prior) < CALIBRATION_MIN_FIGHT_OBSERVATIONS:
+            prior = d[d['event_date'] < cutoff]
 
         try:
             age_cal = calibrate_age_effects(prior)
@@ -924,10 +974,11 @@ def calculate_ude_points_with_ablation(df, ablate=None, opponent_quality_k=OQ_DE
     df = df.sort_values(by='event_date').copy()
     df['event_date'] = pd.to_datetime(df['event_date'])
 
-    # UDE is a historical reconstruction. Calibrations therefore expand through
-    # time exactly like fighter state: a fight at T can only use parameters learned
-    # from fights strictly before T. User-supplied calibrations remain supported as
-    # explicitly frozen production objects; otherwise we build an expanding cache.
+    # UDE is a historical reconstruction: a fight at time T can only use
+    # calibration parameters learned from fights strictly before T (see
+    # _build_temporal_calibration_cache for the rolling-window mechanics).
+    # User-supplied calibrations are supported as explicitly frozen
+    # production objects instead, for callers scoring outside this dataset.
     temporal_calibration_cache = None
     if age_calibration is None and method_pdi_calibration is None:
         temporal_calibration_cache = _build_temporal_calibration_cache(df)
@@ -944,6 +995,12 @@ def calculate_ude_points_with_ablation(df, ablate=None, opponent_quality_k=OQ_DE
 
     # Incremental chronological pair history for rematch/revenge scoring.
     pair_history_cache = {}
+
+    # ABSOLUTE_SWING_CAP diagnostics: how often the circuit-breaker cap on
+    # total per-fight point swings actually binds, out of every scored
+    # fighter-fight observation.
+    swing_cap_triggered_count = 0
+    total_scored_fighter_fights = 0
 
     # Trailing post-fight UDE ratings per fighter, capped to the last
     # UPSET_RATING_WINDOW fights. Used only to smooth the rating gap fed
@@ -1018,7 +1075,7 @@ def calculate_ude_points_with_ablation(df, ablate=None, opponent_quality_k=OQ_DE
             points = championship_fn(raw_base_points, result, is_championship_fight_row(row))
             points = multi_division_fn(points, result, is_title_bout, fighter, weight_class, fighter_title_weight_classes)
             dominant_fighter = row['dominant_fighter']
-            points = dominance_fn(points, fighter_name, opponent_name, result, row['method_mapped'], dominant_fighter, fighter_pdi_margin)
+            points = dominance_fn(points, fighter_name, opponent_name, result, dominant_fighter, fighter_pdi_margin)
 
             # Empirically calibrated method x PDI residual, bounded to a deliberately
             # small achievement-scale contribution. UD is the reference method.
@@ -1032,12 +1089,15 @@ def calculate_ude_points_with_ablation(df, ablate=None, opponent_quality_k=OQ_DE
 
             # Marginal contributions of contextual bonuses
             df.at[index, f'method_pdi_residual_{fighter_col}'] = method_residual_pts
-            # Derived by calculating the delta between the fn's output and the input running points, 
+            # Derived by calculating the delta between the fn's output and the input running points,
             # making it ablation-safe.
-            # Note: title_defense_fn is seeded with `raw_base_points` (pre-championship, pre-dominance) 
-            # to decouple it from standard multipliers active on title-defense fights.
+            # Note: both title_defense_fn and streak_fn are seeded with `raw_base_points`
+            # (pre-championship, pre-dominance) so neither contextual bonus compounds on
+            # top of the other's or of the standard multipliers already active on the fight.
             t_def_bonus = round(title_defense_fn(raw_base_points, title_defenses, is_champion, is_title_bout, result) - raw_base_points, 2)
-            streak_bonus = round(streak_fn(points, result, opponent_streak) - points, 2)
+            streak_bonus = round(streak_fn(raw_base_points, result, opponent_streak) - raw_base_points, 2)
+            df.at[index, f'title_defense_bonus_{fighter_col}'] = t_def_bonus
+            df.at[index, f'streak_bonus_{fighter_col}'] = streak_bonus
 
             # Smoothed (trailing UPSET_RATING_WINDOW-fight average) rating
             # for BOTH fighters, not the raw instantaneous pre-fight UDE
@@ -1068,19 +1128,26 @@ def calculate_ude_points_with_ablation(df, ablate=None, opponent_quality_k=OQ_DE
             rematch_pts = round(rematch_fn(
                 points, result, fighter, opponent, df, current_fight_date, pair_history_cache
             ) - points, 2)
+            df.at[index, f'age_adjustment_{fighter_col}'] = age_pts
+            df.at[index, f'own_age_adjustment_{fighter_col}'] = own_age_pts
+            df.at[index, f'rematch_adjustment_{fighter_col}'] = rematch_pts
             points_before_opponent_quality = points
             opponent_quality_pts = round(opponent_quality_fn(
                 points, result, opponent_pre_fight_record, opponent_is_champion,
                 opponent_title_defenses, k=opponent_quality_k
             ) - points, 2)
 
-            # Summation: Base fight night points + scaled legacy/context bonuses + invariants
-            # (Note: base fight night points already include dominance_fn adjustment)
-            # upset_bonus is added separately since higher_rated_fn already
-            # applied perf_scale internally (see note above).
+            # points already includes championship/dominance/method-residual;
+            # upset_bonus is added directly (not through scaled_bonuses) since
+            # higher_rated_fn already applied perf_scale internally above.
             points = points + scaled_bonuses + upset_bonus + age_pts + own_age_pts + rematch_pts + opponent_quality_pts
 
-            # Bound the final point swing.
+            # Bound the final point swing, tracking how often the cap actually binds.
+            total_scored_fighter_fights += 1
+            swing_cap_triggered = abs(points) > ABSOLUTE_SWING_CAP
+            if swing_cap_triggered:
+                swing_cap_triggered_count += 1
+            df.at[index, f'absolute_swing_cap_triggered_{fighter_col}'] = swing_cap_triggered
             points = max(-ABSOLUTE_SWING_CAP, min(ABSOLUTE_SWING_CAP, points))
 
             # Persist opponent-quality diagnostics for audit/ablation analysis.
@@ -1113,6 +1180,18 @@ def calculate_ude_points_with_ablation(df, ablate=None, opponent_quality_k=OQ_DE
             state['first_result_by_fighter'][fighter_1_url] = row['fight_result_fighter_1']
             state['first_result_by_fighter'][fighter_2_url] = row['fight_result_fighter_2']
         state['count'] += 1
+
+    bind_rate = (swing_cap_triggered_count / total_scored_fighter_fights
+                 if total_scored_fighter_fights else 0.0)
+    logger.info(
+        'ABSOLUTE_SWING_CAP (%s pts) triggered %d/%d scored fighter-fight '
+        'observations (%.4f%% bind rate).',
+        ABSOLUTE_SWING_CAP, swing_cap_triggered_count, total_scored_fighter_fights,
+        bind_rate * 100,
+    )
+    df.attrs['absolute_swing_cap_bind_count'] = swing_cap_triggered_count
+    df.attrs['absolute_swing_cap_total_observations'] = total_scored_fighter_fights
+    df.attrs['absolute_swing_cap_bind_rate'] = bind_rate
 
     return df.sort_values(by='event_date', ascending=False).reset_index(drop=True)
 
