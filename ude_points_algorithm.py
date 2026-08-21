@@ -482,36 +482,26 @@ def dominance_adjustment(points, fighter_name, opponent_name, result, method_map
     multiplier = _interpolate_dominance_multiplier(t, high_anchor, low_anchor)
     return round(points * multiplier, 2)
 
-
 def higher_rated_opponent_bonus(points, result, diff):
-    """Reward wins over higher-rated opponents and penalize bad losses symmetrically.
-
-    ``diff`` is opponent_pre_fight_ude - fighter_pre_fight_ude. Therefore:
-      * positive diff on a win = upset win;
-      * negative diff on a loss = bad loss.
-
-    The loss tiers mirror the win tiers exactly in magnitude.
-    """
     if result == 'W':
-        if 30 <= diff <= 39:
-            return points + 3
-        elif 40 <= diff <= 49:
-            return points + 5
-        elif 50 <= diff <= 59:
-            return points + 7
-        elif diff >= 60:
+        if diff >= 60:
             return points + 9
+        elif diff >= 50:
+            return points + 7
+        elif diff >= 40:
+            return points + 5
+        elif diff >= 30:
+            return points + 3
     elif result == 'L':
-        if -39 <= diff <= -30:
-            return points - 3
-        elif -49 <= diff <= -40:
-            return points - 5
-        elif -59 <= diff <= -50:
-            return points - 7
-        elif diff <= -60:
+        if diff <= -60:
             return points - 9
+        elif diff <= -50:
+            return points - 7
+        elif diff <= -40:
+            return points - 5
+        elif diff <= -30:
+            return points - 3
     return points
-
 # Opponent-quality adjustment
 # Deliberately evaluates the PRE-FIGHT signal: the opponent's record, championship
 # status, and title-defense count are taken from the state immediately before the bout.
