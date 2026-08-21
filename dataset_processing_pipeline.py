@@ -507,6 +507,14 @@ def run_etl_pipeline(
     # Ensure event_date is datetime and sort descending
     if 'event_date' in final_df.columns:
         final_df['event_date'] = pd.to_datetime(final_df['event_date'], errors='coerce')
+        # Re-check for null event_date here too, not just on the freshly-scraped
+        # df back in step 3b: current_dataset (just merged in above) may itself
+        # carry rows with a null/unparseable event_date from before this check
+        # existed, and errors='coerce' just above can turn an unparseable date
+        # string into a fresh NaT. Without this, run_etl_pipeline's own output
+        # could still contain null-date rows despite step 3b's check having
+        # already run -- only appearing clean for freshly-scraped data.
+        final_df = drop_rows_with_null_event_date(final_df)
         final_df = final_df.sort_values(by='event_date', ascending=False).reset_index(drop=True)
 
     return final_df
