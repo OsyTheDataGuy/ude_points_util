@@ -233,8 +233,14 @@ def add_suffix_to_fighter_columns(df: pd.DataFrame, number: int, exclude_cols: l
 
 def convert_to_one_fight_one_row(df: pd.DataFrame) -> pd.DataFrame:
     """Pivots from 2 rows per fight to 1 row per fight with fighter_1 and fighter_2 statistics."""
-    f1_df = add_suffix_to_fighter_columns(df.groupby('fight_url').nth(0).reset_index(), 1)
-    f2_df = add_suffix_to_fighter_columns(df.groupby('fight_url').nth(1).reset_index(), 2)
+    # drop=True: .nth(0)/.nth(1) preserve the original (pre-groupby) row
+    # index, so a bare .reset_index() turns that meaningless row position
+    # into a genuine 'index' column -- it was being silently caught by the
+    # old ordered_columns whitelist at the end of run_etl_pipeline, which
+    # is exactly the failure mode that whitelist was just changed to stop
+    # relying on (see run_etl_pipeline's column-ordering step).
+    f1_df = add_suffix_to_fighter_columns(df.groupby('fight_url').nth(0).reset_index(drop=True), 1)
+    f2_df = add_suffix_to_fighter_columns(df.groupby('fight_url').nth(1).reset_index(drop=True), 2)
 
     fight_df = f1_df.merge(f2_df, on=['fight_url'])
     fight_df['bout'] = fight_df['fighter_1'] + ' vs. ' + fight_df['fighter_2']
@@ -430,8 +436,8 @@ def run_etl_pipeline(
     modified_df = split_fight_stats(df_to_be_split, stat_cols=stat_cols)
     modified_df_clean = clean_modified_df(modified_df)
 
-    # 6. Merge fighter bio details (DOB, Height, Weight, Reach)
-    bio_cols = ['URL', 'DOB', 'Height (m)', 'Weight (lbs)', 'Reach (in)']
+    # 6. Merge fighter bio details (DOB, Height, Weight, Reach, Stance)
+    bio_cols = ['URL', 'DOB', 'Height (m)', 'Weight (lbs)', 'Reach (in)', 'STANCE']
     bio_subset = fighters_clean[[c for c in bio_cols if c in fighters_clean.columns]].drop_duplicates(subset=['URL'])
     df_with_bio = pd.merge(modified_df_clean, bio_subset, left_on='fighter_url', right_on='URL', how='left')
     df_with_bio = df_with_bio.drop(columns=['URL'], errors='ignore')
@@ -478,6 +484,7 @@ def run_etl_pipeline(
         'sub_att_fighter_1', 'rev_fighter_1', 'ctrl_in_secs_fighter_1',
         'fighter_url_fighter_1', 'date_of_birth_fighter_1',
         'Height (m)_fighter_1', 'Weight (lbs)_fighter_1', 'Reach (in)_fighter_1',
+        'STANCE_fighter_1',
         'fighter_2', 'fight_day_age (yrs)_fighter_2', 'fight_result_fighter_2',
         'kd_fighter_2', 'sig_strikes_landed_fighter_2',
         'sig_strikes_attempted_fighter_2', 'sig_strikes_pct_fighter_2',
@@ -491,10 +498,21 @@ def run_etl_pipeline(
         'ground_strikes_landed_fighter_2', 'ground_strikes_attempted_fighter_2',
         'sub_att_fighter_2', 'rev_fighter_2', 'ctrl_in_secs_fighter_2',
         'fighter_url_fighter_2', 'date_of_birth_fighter_2',
-        'Height (m)_fighter_2', 'Weight (lbs)_fighter_2', 'Reach (in)_fighter_2'
+        'Height (m)_fighter_2', 'Weight (lbs)_fighter_2', 'Reach (in)_fighter_2',
+        'STANCE_fighter_2'
     ]
+    # Columns not named in ordered_columns are APPENDED, not dropped. By
+    # this point in the pipeline every column present was deliberately
+    # constructed by an earlier step -- there's no leftover junk left to
+    # filter out here, so this list's real job is fixing a readable order
+    # for the columns people care about seeing first, not deciding what
+    # belongs in the output. A strict whitelist silently dropped a column
+    # (STANCE) that a genuine upstream step had already added; appending
+    # unlisted columns instead means a future addition shows up (at the
+    # end) rather than vanishing if someone forgets to list it here too.
     present_cols = [c for c in ordered_columns if c in final_df.columns]
-    final_df = final_df.loc[:, present_cols]
+    remaining_cols = [c for c in final_df.columns if c not in ordered_columns]
+    final_df = final_df.loc[:, present_cols + remaining_cols]
 
     # 13. Optional: merge/append with existing historical dataset
     if current_dataset is not None and not current_dataset.empty:
