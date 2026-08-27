@@ -1,566 +1,1065 @@
 # -*- coding: utf-8 -*-
-"""
-UFC Fight Data - ETL Processing Pipeline
-Converts raw scraped fight, event, and fighter bio datasets into a clean 1-row-per-fight dataset.
-"""
+"""# 5. Feature Engineering for ude points - Dictionary Batched"""
 
 import pandas as pd
 import numpy as np
-from datetime import datetime
 
+from ude_points_algorithm import quality_score as _quality_score_fn
+from dataset_processing_pipeline import drop_rows_with_null_event_date
 
-# ==============================================================================
-# 1. Fighter Bio Preprocessing
-# ==============================================================================
+"""## 1. Create is_title_bout column"""
 
-def process_fighter_bio(fighters_df: pd.DataFrame) -> pd.DataFrame:
+def create_is_title_bout_column(df, weight_class_col='weight_class'):
+    """Create 'is_title_bout' column using batch dictionary concatenation."""
+    s = df[weight_class_col].fillna('').astype(str)
+
+    # Define boolean masks for explicit conditions
+    is_title = s.str.contains('Title Bout')
+    is_interim = s.str.contains('Interim')
+    is_tournament = s.str.contains('Tournament')
+
+    # Evaluate conditions: must be a Title/Interim bout AND NOT a Tournament
+    is_tb = np.where(is_title & ~is_tournament, 2,
+            np.where(is_interim & ~is_tournament, 1, 0))
+
+    new_cols = {'is_title_bout': is_tb}
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
+"""## 2. Fix the weight class column"""
+
+def map_weight_class(weight_class):
+    """Map weight classes to their corresponding codes."""
+    if not isinstance(weight_class, str):
+        return weight_class
+
+    weight_classes = {
+        'Light Heavyweight': 'LHW',
+        'Heavyweight': 'HW',
+        'Middleweight': 'MW',
+        'Welterweight': 'WW',
+        'Lightweight': 'LW',
+        'Featherweight': 'FW',
+        'Bantamweight': 'BW',
+        'Flyweight': 'FLW',
+        'Strawweight': 'SW'
+    }
+
+    # Longest name first: 'Heavyweight' is a literal substring of 'Light
+    # Heavyweight', so a shorter name must never get a chance to match before
+    # a longer one that contains it. Sorting removes the dependency on dict
+    # insertion order (previously the only thing preventing a misclassification).
+    for class_name, code in sorted(weight_classes.items(), key=lambda kv: -len(kv[0])):
+        if class_name in weight_class:
+            return 'W' + code if 'Women' in weight_class else code
+
+    return weight_class
+
+"""## 3. Create is_champion column"""
+
+def update_champion_status(df):
     """
-    Cleans HEIGHT, WEIGHT, and REACH from raw fighter profile data.
-    - HEIGHT: converted from feet/inches (e.g. 5' 11") to meters (float)
-    - WEIGHT: converted from lbs string (e.g. '155 lbs.') to float
-    - REACH: converted from inches string (e.g. '72"') to float
+    Update champion status for fighters sequentially.
+    Assumes chronological sort (ascending=True).
     """
-    # CHANGE: Maintained one copy here at the ingestion point, removed downstream copies.
-    df = fighters_df.copy()
+    champ_1, champ_2 = [], []
+    fighter_champions = {}
 
-    # CHANGE: Pre-step standardizing for column names and null values.
-    df.columns = df.columns.str.upper()
-    resolve_cols = [c for c in ['HEIGHT', 'WEIGHT', 'REACH', 'STANCE', 'DOB'] if c in df.columns]
-    if resolve_cols:
-        df[resolve_cols] = df[resolve_cols].replace('--', np.nan)
+    for row in df.itertuples(index=False):
+        is_tb = getattr(row, 'is_title_bout', 0)
+        wc = getattr(row, 'weight_class_cleaned', '')
+        f1, f2 = row.fighter_1, row.fighter_2
+        r1, r2 = row.fight_result_fighter_1, row.fight_result_fighter_2
 
-    # CHANGE: Replaced Python-level .apply() functions with vectorized regex extraction.
-    if 'HEIGHT' in df.columns:
-        extracted = df['HEIGHT'].astype(str).str.extract(r"(\d+)'\s*(\d+)?")
-        df['Height (m)'] = (extracted[0].astype(float) * 0.3048 + extracted[1].fillna(0).astype(float) * 0.0254).round(2)
+        if f1 not in fighter_champions: fighter_champions[f1] = {}
+        if wc not in fighter_champions[f1]: fighter_champions[f1][wc] = {'status': 0}
+        if f2 not in fighter_champions: fighter_champions[f2] = {}
+        if wc not in fighter_champions[f2]: fighter_champions[f2][wc] = {'status': 0}
 
-    if 'WEIGHT' in df.columns:
-        df['Weight (lbs)'] = df['WEIGHT'].astype(str).str.extract(r'(\d+)').astype(float)
+        c1_status = fighter_champions[f1][wc]['status']
+        c2_status = fighter_champions[f2][wc]['status']
 
-    if 'REACH' in df.columns:
-        df['Reach (in)'] = df['REACH'].astype(str).str.extract(r'(\d+)').astype(float)
+        champ_1.append(c1_status)
+        champ_2.append(c2_status)
 
-    return df
+        # Update status after capturing current fight status
+        if is_tb > 0:
+            if r1 == 'W':
+                fighter_champions[f1][wc]['status'] = 1 if is_tb == 1 else 2
+            elif r1 == 'L':
+                fighter_champions[f1][wc]['status'] = 0
 
+            if r2 == 'W':
+                fighter_champions[f2][wc]['status'] = 1 if is_tb == 1 else 2
+            elif r2 == 'L':
+                fighter_champions[f2][wc]['status'] = 0
 
-# ==============================================================================
-# 2. Column Standardizing & Cleaning
-# ==============================================================================
+    new_cols = {
+        'is_champion_fighter_1': champ_1,
+        'is_champion_fighter_2': champ_2
+    }
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
-def rename_strike_columns(df: pd.DataFrame, strike_columns: list) -> pd.DataFrame:
-    """Renames 'str' to 'strikes' and appends '_strikes' suffix to strike columns."""
-    df.columns = df.columns.str.replace('str', 'strikes')
-    rename_dict = {col: f"{col}_strikes" for col in strike_columns if col in df.columns}
-    return df.rename(columns=rename_dict)
+"""## 4. Title defenses"""
 
-
-def standardize_columns(df: pd.DataFrame, strike: bool = True) -> pd.DataFrame:
+def update_title_defenses(df):
     """
-    Standardizes column names: lowercase, strip periods, replace spaces/periods with underscores.
+    Update title defenses for fighters based on fight outcomes.
+    Assumes chronological sort (ascending=True).
     """
-    # CHANGE: Removed df = df.copy() to eliminate memory allocation overhead.
-    df.columns = (
-        df.columns.str.lower()
-        .str.strip('.')
-        .str.replace(' ', '_')
-        .str.replace('.', '_', regex=False)
-        .str.replace('%', 'pct')
-        .str.replace('__', '_')
-    )
+    def_1, def_2 = [], []
+    fighter_defenses = {}
 
-    if strike:
-        strike_columns = ['head', 'body', 'leg', 'distance', 'clinch', 'ground']
-        df = rename_strike_columns(df, strike_columns)
+    for row in df.itertuples(index=False):
+        is_tb = getattr(row, 'is_title_bout', 0)
+        wc = getattr(row, 'weight_class_cleaned', '')
+        f1, f2 = row.fighter_1, row.fighter_2
+        r1, r2 = row.fight_result_fighter_1, row.fight_result_fighter_2
+        champ1 = getattr(row, 'is_champion_fighter_1', 0)
+        champ2 = getattr(row, 'is_champion_fighter_2', 0)
 
-    if 'finish_details' in df.columns:
-        df = df.rename(columns={'finish_details': 'details'})
+        if f1 not in fighter_defenses: fighter_defenses[f1] = {}
+        if wc not in fighter_defenses[f1]: fighter_defenses[f1][wc] = 0
+        if f2 not in fighter_defenses: fighter_defenses[f2] = {}
+        if wc not in fighter_defenses[f2]: fighter_defenses[f2][wc] = 0
 
-    return df
+        cur_def1 = fighter_defenses[f1][wc]
+        cur_def2 = fighter_defenses[f2][wc]
 
+        def_1.append(cur_def1)
+        def_2.append(cur_def2)
 
-# ==============================================================================
-# 3. Split Fight Stats (1 Row -> 2 Rows: 1 per fighter)
-# ==============================================================================
+        if champ1 > 0:
+            if r1 == 'W' and is_tb > 0:
+                fighter_defenses[f1][wc] += 1
+            elif r1 == 'L' and is_tb > 0:
+                fighter_defenses[f1][wc] = 0
 
-def split_fight_stats(df: pd.DataFrame, stat_cols: list) -> pd.DataFrame:
+        if champ2 > 0:
+            if r2 == 'W' and is_tb > 0:
+                fighter_defenses[f2][wc] += 1
+            elif r2 == 'L' and is_tb > 0:
+                fighter_defenses[f2][wc] = 0
+
+    new_cols = {
+        'title_defenses_fighter_1': def_1,
+        'title_defenses_fighter_2': def_2
+    }
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
+"""## 5. UFC record"""
+
+def initialize_fighter_record():
+    return {'W': 0, 'L': 0, 'D': 0, 'NC': 0}
+
+def update_fighter_record(record, fight_result):
+    if fight_result in record:
+        record[fight_result] += 1
+    return record
+
+def format_record(record):
+    return f"{record['W']}-{record['L']}-{record['D']} {record['NC']}"
+
+def update_fight_records(df):
+    pre_1, post_1, pre_2, post_2 = [], [], [], []
+    fighter_records = {}
+
+    for row in df.itertuples(index=False):
+        f1, f2 = row.fighter_1, row.fighter_2
+        r1, r2 = row.fight_result_fighter_1, row.fight_result_fighter_2
+
+        if f1 not in fighter_records: fighter_records[f1] = initialize_fighter_record()
+        if f2 not in fighter_records: fighter_records[f2] = initialize_fighter_record()
+
+        p1_pre = format_record(fighter_records[f1])
+        fighter_records[f1] = update_fighter_record(fighter_records[f1], r1)
+        p1_post = format_record(fighter_records[f1])
+
+        p2_pre = format_record(fighter_records[f2])
+        fighter_records[f2] = update_fighter_record(fighter_records[f2], r2)
+        p2_post = format_record(fighter_records[f2])
+
+        pre_1.append(p1_pre)
+        post_1.append(p1_post)
+        pre_2.append(p2_pre)
+        post_2.append(p2_post)
+
+    new_cols = {
+        'pre_fight_record_fighter_1_(W-L-D NC)': pre_1,
+        'post_fight_record_fighter_1_(W-L-D NC)': post_1,
+        'pre_fight_record_fighter_2_(W-L-D NC)': pre_2,
+        'post_fight_record_fighter_2_(W-L-D NC)': post_2
+    }
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
+"""## 5b. Opponent quality score"""
+
+def add_quality_score_columns(df):
     """
-    Splits multi-line newline-delimited statistics into two separate rows (one per fighter).
+    Adds quality_score_fighter_1/quality_score_fighter_2: each fighter's
+    pre-fight "opponent quality" score, as consumed both by the UDE scoring
+    loop's opponent-quality adjustment and by the temporal method x PDI
+    calibration in ude_points_algorithm.
+
+    Why this needs to live here (in feature engineering) rather than only
+    being written at UDE-scoring time:
+
+    ude_points_algorithm's temporal method x PDI calibration
+    (_build_temporal_calibration_cache -> calibrate_method_pdi_effects ->
+    _build_future_performance_observations) builds its per-year calibration
+    cache *before* any UDE points are scored. It reads
+    `quality_score_fighter_{opponent_side}` directly off `df` while scanning
+    fight history. But historically that column was only ever populated
+    incrementally, mid-loop, by the scoring pass itself
+    (`df.at[index, f'quality_score_{opponent_col}'] = ...`) -- so at
+    calibration time the column didn't exist yet, `row.get(...)` fell back
+    to NaN for every row, and every observation was subsequently dropped by
+    `dropna(subset=['opponent_quality', ...])`. Calibration therefore never
+    had enough (or any) usable observations, regardless of how much fight
+    history was actually available.
+
+    quality_score is a pure function of a fighter's own PRE-fight state
+    (pre-fight record, current champion status, title-defense count) --
+    fields already produced earlier in this pipeline -- so computing it
+    here introduces no leakage: quality_score_fighter_1 for a given row
+    depends only on information already known strictly before that fight.
+
+    Must run after update_champion_status, update_title_defenses, and
+    update_fight_records (needs is_champion_*, title_defenses_*, and
+    pre_fight_record_*_(W-L-D NC) to already exist).
     """
-    # CHANGE: Eliminated hardcoded positional index 'border=16' in favor of explicit schema declarations.
-    actual_stat_cols = [c for c in stat_cols if c in df.columns]
-    common_cols = [c for c in df.columns if c not in actual_stat_cols]
+    new_cols = {}
+    for f in ['fighter_1', 'fighter_2']:
+        new_cols[f'quality_score_{f}'] = df.apply(
+            lambda row: _quality_score_fn(
+                row[f'pre_fight_record_{f}_(W-L-D NC)'],
+                row[f'is_champion_{f}'],
+                row[f'title_defenses_{f}'],
+            ),
+            axis=1,
+        )
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
-    df_f1 = df[common_cols].copy()
-    df_f2 = df[common_cols].copy()
+"""## 6. Win streaks"""
 
-    # CHANGE: Replaced iterrows() loop with fully vectorized Pandas string splitting.
-    for col in actual_stat_cols:
-        if col == 'fighter':
-            # Preserve spaces for fighter names
-            split_df = df[col].astype(str).str.split('\n', expand=True)
+def update_win_streaks(df):
+    streak_1, streak_2 = [], []
+    fighter_streaks = {}
+
+    for row in df.itertuples(index=False):
+        f1, f2 = row.fighter_1, row.fighter_2
+        r1, r2 = row.fight_result_fighter_1, row.fight_result_fighter_2
+
+        if f1 not in fighter_streaks: fighter_streaks[f1] = 0
+        if f2 not in fighter_streaks: fighter_streaks[f2] = 0
+
+        cur_s1 = fighter_streaks[f1]
+        cur_s2 = fighter_streaks[f2]
+
+        streak_1.append(cur_s1)
+        streak_2.append(cur_s2)
+
+        if r1 == 'W': fighter_streaks[f1] = cur_s1 + 1 if cur_s1 >= 0 else 1
+        elif r1 == 'D': fighter_streaks[f1] = 0
+        elif r1 == 'NC': pass
+        elif r1 == 'L': fighter_streaks[f1] = cur_s1 - 1 if cur_s1 <= 0 else -1
+
+        if r2 == 'W': fighter_streaks[f2] = cur_s2 + 1 if cur_s2 >= 0 else 1
+        elif r2 == 'D': fighter_streaks[f2] = 0
+        elif r2 == 'NC': pass
+        elif r2 == 'L': fighter_streaks[f2] = cur_s2 - 1 if cur_s2 <= 0 else -1
+
+    new_cols = {
+        'W/L_streak_fighter_1': streak_1,
+        'W/L_streak_fighter_2': streak_2
+    }
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
+"""## 7. Career striking and takedown accuracy"""
+
+def update_career_means(df):
+    c_sig_acc_1, c_sig_acc_2 = [], []
+    c_sig_mean_1, c_sig_mean_2 = [], []
+    c_td_mean_1, c_td_mean_2 = [], []
+    c_td_acc_1, c_td_acc_2 = [], []
+
+    fighter_stats = {}
+
+    for row in df.itertuples(index=False):
+        f1, f2 = row.fighter_1, row.fighter_2
+
+        for f in [f1, f2]:
+            if f not in fighter_stats:
+                fighter_stats[f] = {
+                    'sig_strikes_landed': 0,
+                    'sig_strikes_attempted': 0,
+                    'td_landed': 0,
+                    'td_attempted': 0,
+                    'fight_count': 0
+                }
+
+        curr1 = fighter_stats[f1]
+        sig_acc1 = (curr1['sig_strikes_landed'] / curr1['sig_strikes_attempted'] * 100) if curr1['sig_strikes_attempted'] > 0 else 0.0
+        td_acc1 = (curr1['td_landed'] / curr1['td_attempted'] * 100) if curr1['td_attempted'] > 0 else 0.0
+        fc1 = curr1['fight_count']
+        sig_mean1 = (curr1['sig_strikes_landed'] / fc1) if fc1 > 0 else 0.0
+        td_mean1 = (curr1['td_landed'] / fc1) if fc1 > 0 else 0.0
+
+        curr2 = fighter_stats[f2]
+        sig_acc2 = (curr2['sig_strikes_landed'] / curr2['sig_strikes_attempted'] * 100) if curr2['sig_strikes_attempted'] > 0 else 0.0
+        td_acc2 = (curr2['td_landed'] / curr2['td_attempted'] * 100) if curr2['td_attempted'] > 0 else 0.0
+        fc2 = curr2['fight_count']
+        sig_mean2 = (curr2['sig_strikes_landed'] / fc2) if fc2 > 0 else 0.0
+        td_mean2 = (curr2['td_landed'] / fc2) if fc2 > 0 else 0.0
+
+        c_sig_acc_1.append(sig_acc1)
+        c_sig_mean_1.append(sig_mean1)
+        c_td_mean_1.append(td_mean1)
+        c_td_acc_1.append(td_acc1)
+
+        c_sig_acc_2.append(sig_acc2)
+        c_sig_mean_2.append(sig_mean2)
+        c_td_mean_2.append(td_mean2)
+        c_td_acc_2.append(td_acc2)
+
+        curr1['sig_strikes_landed'] += getattr(row, 'sig_strikes_landed_fighter_1', 0)
+        curr1['sig_strikes_attempted'] += getattr(row, 'sig_strikes_attempted_fighter_1', 0)
+        curr1['td_landed'] += getattr(row, 'td_landed_fighter_1', 0)
+        curr1['td_attempted'] += getattr(row, 'td_attempted_fighter_1', 0)
+        curr1['fight_count'] += 1
+
+        curr2['sig_strikes_landed'] += getattr(row, 'sig_strikes_landed_fighter_2', 0)
+        curr2['sig_strikes_attempted'] += getattr(row, 'sig_strikes_attempted_fighter_2', 0)
+        curr2['td_landed'] += getattr(row, 'td_landed_fighter_2', 0)
+        curr2['td_attempted'] += getattr(row, 'td_attempted_fighter_2', 0)
+        curr2['fight_count'] += 1
+
+    new_cols = {
+        'career_sig_strikes_landed_fighter_1 (mean)': c_sig_mean_1,
+        'career_sig_strikes_landed_fighter_2 (mean)': c_sig_mean_2,
+        'career_sig_striking_accuracy_fighter_1': c_sig_acc_1,
+        'career_sig_striking_accuracy_fighter_2': c_sig_acc_2,
+        'career_td_landed_fighter_1 (mean)': c_td_mean_1,
+        'career_td_landed_fighter_2 (mean)': c_td_mean_2,
+        'career_td_accuracy_fighter_1': c_td_acc_1,
+        'career_td_accuracy_fighter_2': c_td_acc_2
+    }
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
+"""## 8. Fix the method column"""
+
+def map_fight_method(result):
+    mapping = {
+        'Decision - Unanimous': 'UD',
+        'Decision - Majority': 'MD',
+        'Decision - Split': 'SD',
+        'KO/TKO': 'Finish',
+        'TKO - Doctor\'s Stoppage': 'Finish',
+        'Submission': 'Finish'
+    }
+    return mapping.get(result, result)
+
+"""## 9. Create rematch column"""
+
+def add_rematch_features(df):
+    pairs = [tuple(sorted([f1, f2])) for f1, f2 in zip(df['fighter_1'], df['fighter_2'])]
+    pair_series = pd.Series(pairs, index=df.index)
+    rematch_col = pair_series.groupby(pair_series).cumcount()
+    is_rematch = (rematch_col > 0).astype(int)
+
+    new_cols = {
+        'rematch_column': rematch_col,
+        'is_rematch': is_rematch
+    }
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
+"""## 10. Static and Dynamic Accuracy / Defence"""
+
+def add_defense_columns(df):
+    new_cols = {}
+    for fighter_col, opponent_col in [('fighter_1', 'fighter_2'), ('fighter_2', 'fighter_1')]:
+        opt_att_str = df[f'sig_strikes_attempted_{opponent_col}']
+        opt_land_str = df[f'sig_strikes_landed_{opponent_col}']
+        new_cols[f'sig_strikes_defense_{fighter_col}'] = np.where(
+            opt_att_str == 0,
+            np.nan,
+            np.round((opt_att_str - opt_land_str) / opt_att_str * 100, 2)
+        )
+
+        opt_att_td = df[f'td_attempted_{opponent_col}']
+        opt_land_td = df[f'td_landed_{opponent_col}']
+        new_cols[f'td_defense_{fighter_col}'] = np.where(
+            opt_att_td == 0,
+            np.nan,
+            np.round((opt_att_td - opt_land_td) / opt_att_td * 100, 2)
+        )
+
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
+def add_dynamic_strike_accuracy(df):
+    strike_types = ['sig', 'head', 'body', 'leg']
+    new_cols = {f'dynamic_{st}_strikes_accuracy_{f}': [] for st in strike_types for f in ['fighter_1', 'fighter_2']}
+    
+    cumulative_stats = {st: {} for st in strike_types}
+
+    for row in df.itertuples(index=False):
+        for f_col in ['fighter_1', 'fighter_2']:
+            f_url = getattr(row, f'fighter_url_{f_col}')
+            for st in strike_types:
+                landed = getattr(row, f'{st}_strikes_landed_{f_col}')
+                attempted = getattr(row, f'{st}_strikes_attempted_{f_col}')
+
+                if f_url not in cumulative_stats[st]:
+                    cumulative_stats[st][f_url] = {'landed': 0, 'attempted': 0}
+
+                c_landed = cumulative_stats[st][f_url]['landed']
+                c_attempted = cumulative_stats[st][f_url]['attempted']
+                
+                curr_acc = np.nan if c_attempted == 0 else round(c_landed / c_attempted, 3)
+                new_cols[f'dynamic_{st}_strikes_accuracy_{f_col}'].append(curr_acc)
+
+                cumulative_stats[st][f_url]['landed'] += landed
+                cumulative_stats[st][f_url]['attempted'] += attempted
+
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
+def add_dynamic_strike_defence(df):
+    strike_types = ['sig', 'head', 'body', 'leg']
+    new_cols = {f'dynamic_{st}_strikes_defence_{f}': [] for st in strike_types for f in ['fighter_1', 'fighter_2']}
+    
+    cumulative_defence_stats = {st: {} for st in strike_types}
+
+    for row in df.itertuples(index=False):
+        for f_col, opp_col in [('fighter_1', 'fighter_2'), ('fighter_2', 'fighter_1')]:
+            f_url = getattr(row, f'fighter_url_{f_col}')
+            for st in strike_types:
+                opp_landed = getattr(row, f'{st}_strikes_landed_{opp_col}')
+                opp_attempted = getattr(row, f'{st}_strikes_attempted_{opp_col}')
+
+                if f_url not in cumulative_defence_stats[st]:
+                    cumulative_defence_stats[st][f_url] = {'faced': 0, 'avoided': 0}
+
+                c_faced = cumulative_defence_stats[st][f_url]['faced']
+                c_avoided = cumulative_defence_stats[st][f_url]['avoided']
+
+                curr_def = np.nan if c_faced == 0 else round(c_avoided / c_faced, 3)
+                new_cols[f'dynamic_{st}_strikes_defence_{f_col}'].append(curr_def)
+
+                avoided_in_fight = max(0, opp_attempted - opp_landed)
+                cumulative_defence_stats[st][f_url]['faced'] += opp_attempted
+                cumulative_defence_stats[st][f_url]['avoided'] += avoided_in_fight
+
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
+def add_dynamic_td_accuracy(df):
+    td_acc_1, td_acc_2 = [], []
+    cumulative_stats = {}
+
+    for row in df.itertuples(index=False):
+        for f_col in ['fighter_1', 'fighter_2']:
+            f_url = getattr(row, f'fighter_url_{f_col}')
+            td_landed = getattr(row, f'td_landed_{f_col}')
+            td_attempted = getattr(row, f'td_attempted_{f_col}')
+
+            if f_url not in cumulative_stats:
+                cumulative_stats[f_url] = {'landed': 0, 'attempted': 0}
+
+            c_landed = cumulative_stats[f_url]['landed']
+            c_attempted = cumulative_stats[f_url]['attempted']
+
+            acc = np.nan if c_attempted == 0 else round(c_landed / c_attempted, 3)
+            if f_col == 'fighter_1':
+                td_acc_1.append(acc)
+            else:
+                td_acc_2.append(acc)
+
+            cumulative_stats[f_url]['landed'] += td_landed
+            cumulative_stats[f_url]['attempted'] += td_attempted
+
+    new_cols = {
+        'dynamic_td_accuracy_fighter_1': td_acc_1,
+        'dynamic_td_accuracy_fighter_2': td_acc_2
+    }
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
+def add_dynamic_td_defence(df):
+    td_def_1, td_def_2 = [], []
+    cumulative_defence_stats = {}
+
+    for row in df.itertuples(index=False):
+        for f_col, opp_col in [('fighter_1', 'fighter_2'), ('fighter_2', 'fighter_1')]:
+            f_url = getattr(row, f'fighter_url_{f_col}')
+            opp_td_landed = getattr(row, f'td_landed_{opp_col}')
+            opp_td_attempted = getattr(row, f'td_attempted_{opp_col}')
+
+            if f_url not in cumulative_defence_stats:
+                cumulative_defence_stats[f_url] = {'faced': 0, 'avoided': 0}
+
+            c_faced = cumulative_defence_stats[f_url]['faced']
+            c_avoided = cumulative_defence_stats[f_url]['avoided']
+
+            def_val = np.nan if c_faced == 0 else round(c_avoided / c_faced, 3)
+            if f_col == 'fighter_1':
+                td_def_1.append(def_val)
+            else:
+                td_def_2.append(def_val)
+
+            avoided_in_fight = max(0, opp_td_attempted - opp_td_landed)
+            cumulative_defence_stats[f_url]['faced'] += opp_td_attempted
+            cumulative_defence_stats[f_url]['avoided'] += avoided_in_fight
+
+    new_cols = {
+        'dynamic_td_defence_fighter_1': td_def_1,
+        'dynamic_td_defence_fighter_2': td_def_2
+    }
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
+"""## 11. Time calculations & per-minute rates"""
+
+def time_to_minutes(time_str):
+    try:
+        minutes, seconds = map(int, str(time_str).split(':'))
+        return minutes + (1 if seconds > 0 else 0)
+    except Exception:
+        return np.nan
+
+def add_time_and_per_min_features(df):
+    new_cols = {}
+    
+    if 'time' in df.columns:
+        time_mins = df['time'].apply(time_to_minutes)
+        new_cols['time_in_mins'] = time_mins
+    else:
+        time_mins = df['time_in_mins']
+
+    if 'time_format' in df.columns:
+        new_cols['match_format_rounds'] = df['time_format'].astype(str).str.extract(r'^(\d{1})')[0]
+
+    round_ended = pd.to_numeric(df['round_ended'], errors='coerce')
+    total_time = ((round_ended - 1) * 5) + time_mins
+    total_time = total_time.replace(0, np.nan)
+    new_cols['total_time_in_mins'] = total_time
+
+    for col in list(df.columns):
+        if ('strikes_landed' in col or 'strikes_attempted' in col) and ('career' not in col and 'diff' not in col and 'per_min' not in col):
+            per_min_col = col.replace('_fighter', '_per_min_fighter')
+            new_cols[per_min_col] = round(df[col] / total_time, 2)
+
+        if 'strikes_landed' in col and ('career' not in col and 'diff' not in col and 'per_min' not in col):
+            if 'fighter_1' in col:
+                absorbed_col = col.replace('strikes_landed_fighter_1', 'strikes_absorbed_per_min_fighter_2')
+                new_cols[absorbed_col] = round(df[col] / total_time, 2)
+            elif 'fighter_2' in col:
+                absorbed_col = col.replace('strikes_landed_fighter_2', 'strikes_absorbed_per_min_fighter_1')
+                new_cols[absorbed_col] = round(df[col] / total_time, 2)
+
+    for f in ['fighter_1', 'fighter_2']:
+        new_cols[f'td_landed_per_15_minutes_{f}'] = round((df[f'td_landed_{f}'] / total_time) * 15, 2)
+
+    new_cols['td_conceded_per_15_minutes_fighter_1'] = round((df['td_landed_fighter_2'] / total_time) * 15, 2)
+    new_cols['td_conceded_per_15_minutes_fighter_2'] = round((df['td_landed_fighter_1'] / total_time) * 15, 2)
+
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
+"""## 12. Standing significant strikes"""
+
+def add_standing_sig_strikes_columns(df):
+    new_cols = {}
+    for fighter in ['fighter_1', 'fighter_2']:
+        new_cols[f'standing_sig_strikes_landed_{fighter}'] = df[f'distance_strikes_landed_{fighter}'] + df[f'clinch_strikes_landed_{fighter}']
+        new_cols[f'standing_sig_strikes_attempted_{fighter}'] = df[f'distance_strikes_attempted_{fighter}'] + df[f'clinch_strikes_attempted_{fighter}']
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
+"""## 13. Dominance Differentials & Phase Performance"""
+
+def process_dominance_differentials(df, stat_prefixes=['sig_strikes_landed', 'head_strikes_landed', 'standing_sig_strikes_landed', 'kd', 'td_landed', 'ctrl_in_secs', 'ground_strikes_landed', 'sub_att']):
+    new_cols = {}
+    for prefix in stat_prefixes:
+        s1 = pd.to_numeric(df[f'{prefix}_fighter_1'].astype(str).str.strip(), errors='coerce')
+        s2 = pd.to_numeric(df[f'{prefix}_fighter_2'].astype(str).str.strip(), errors='coerce')
+        new_cols[f'{prefix}_diff_fighter_1'] = s1 - s2
+        new_cols[f'{prefix}_diff_fighter_2'] = s2 - s1
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
+def add_who_won_col(df):
+    new_cols = {}
+    s1, s2 = df['standing_sig_strikes_landed_diff_fighter_1'], df['standing_sig_strikes_landed_diff_fighter_2']
+    new_cols['who_won_striking'] = np.where(s1 > 0, df['fighter_1'], np.where(s2 > 0, df['fighter_2'], 'No Difference'))
+
+    w1 = (df['td_landed_diff_fighter_1'] > 0) & (df['ground_strikes_landed_diff_fighter_1'] > 0)
+    w2 = (df['td_landed_diff_fighter_2'] > 0) & (df['ground_strikes_landed_diff_fighter_2'] > 0)
+    new_cols['who_won_wrestling'] = np.where(w1, df['fighter_1'], np.where(w2, df['fighter_2'], 'No Difference'))
+
+    g1, g2 = df['sub_att_diff_fighter_1'], df['sub_att_diff_fighter_2']
+    new_cols['who_won_grappling'] = np.where(g1 > 0, df['fighter_1'], np.where(g2 > 0, df['fighter_2'], 'No Difference'))
+
+    c1, c2 = df['ctrl_in_secs_diff_fighter_1'], df['ctrl_in_secs_diff_fighter_2']
+    new_cols['who_won_control'] = np.where(c1 > 0, df['fighter_1'], np.where(c2 > 0, df['fighter_2'], 'No Difference'))
+
+    d1, d2 = df['kd_diff_fighter_1'], df['kd_diff_fighter_2']
+    new_cols['who_won_standing_danger'] = np.where(d1 > 0, df['fighter_1'], np.where(d2 > 0, df['fighter_2'], 'No Difference'))
+
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
+def add_dominance_columns(df):
+    phases = ['who_won_grappling', 'who_won_striking', 'who_won_wrestling', 'who_won_control', 'who_won_standing_danger']
+    dom_fighters, phases_wons = [], []
+
+    for row in df.itertuples(index=False):
+        f1, f2 = row.fighter_1, row.fighter_2
+        f1_wins = sum(getattr(row, phase) == f1 for phase in phases)
+        f2_wins = sum(getattr(row, phase) == f2 for phase in phases)
+
+        if f1_wins >= 3 and f1_wins > f2_wins:
+            dom_f = f1
+        elif f2_wins >= 3 and f2_wins > f1_wins:
+            dom_f = f2
         else:
-            # Strip spaces from numeric stats before split
-            split_df = df[col].astype(str).str.replace(' ', '').str.split('\n', expand=True)
+            dom_f = None
 
-        df_f1[col] = split_df[0].str.strip() if 0 in split_df.columns else ''
-        df_f2[col] = split_df[1].str.strip() if 1 in split_df.columns else ''
+        dom_fighters.append(dom_f)
+        phases_wons.append(max(f1_wins, f2_wins))
 
-    # Recombine split frames back into 2 rows per fight
-    new_df = pd.concat([df_f1, df_f2], ignore_index=True)
-    return new_df
+    new_cols = {
+        'dominant_fighter': dom_fighters,
+        'phases_won': phases_wons
+    }
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
-
-def clean_modified_df(df: pd.DataFrame) -> pd.DataFrame:
+def _dominance_magnitude(landed_for, landed_against, count_threshold, prop_threshold,
+                          count_width=0.10, prop_width=0.05):
     """
-    Assigns correct fighter_url and fight_result to each row and drops redundant columns.
+    Magnitude for a landed-count phase (takedowns, submission attempts):
+    blends a "close" curve (capped at 0.35) and a "decisive" curve (starting
+    at 0.36) by a continuous decisive_weight in [0, 1], instead of switching
+    between them at a hard (count > count_threshold and proportion >=
+    prop_threshold) gate. decisive_weight is a soft AND (product of two
+    sigmoids, one per condition), so it only approaches 1 when BOTH the
+    count and the proportion clear their threshold.
+
+    count_width is deliberately tight (0.10): landed counts are integers, so
+    there's nothing to interpolate between them -- a tight width preserves
+    the original intent that 1-3 landed (whatever the proportion) stays
+    capped near 0.35, rather than smoothing that protection away. The actual
+    value this function adds over the old hard gate is in the proportion
+    dimension (genuinely continuous) and in removing the 0.35/0.36 value gap
+    that existed at the boundary even for infinitesimally close inputs.
     """
-    # CHANGE: Removed df = df.copy().
-    df['fighter_url'] = np.where(
-        df['fighter_1_name'] == df['fighter'],
-        df['fighter_1_url'],
-        df['fighter_2_url']
-    )
-    df['fight_result'] = np.where(
-        df['fighter_1_name'] == df['fighter'],
-        df['fighter_1_result'],
-        df['fighter_2_result']
-    )
+    diff = landed_for - landed_against
+    total = landed_for + landed_against + 1e-5
+    proportion = landed_for / total if total > 1e-5 else 0.5
 
-    drop_cols = [
-        'fighter_1_name', 'fighter_1_url', 'fighter_1_result',
-        'fighter_2_name', 'fighter_2_url', 'fighter_2_result'
-    ]
-    df = df.drop(columns=[c for c in drop_cols if c in df.columns])
-    return df
+    close = min(0.35, 0.10 + (diff / max(1, landed_for)) * 0.25)
+    decisive = min(1.0, 0.36 + (diff / total) * 0.64)
+
+    count_w = 1.0 / (1.0 + np.exp(-(landed_for - count_threshold) / count_width))
+    prop_w = 1.0 / (1.0 + np.exp(-(proportion - prop_threshold) / prop_width))
+    decisive_weight = count_w * prop_w
+
+    return (1.0 - decisive_weight) * close + decisive_weight * decisive
 
 
-# ==============================================================================
-# 4. Metric Parsing Helpers
-# ==============================================================================
+def calculate_phase_magnitude_and_pdi(row, phases):
+    STRIKING_VOLUME_FLOOR = 15
 
-def split_strike_column(df: pd.DataFrame, col: str, new_col_landed: str, new_col_attempted: str) -> pd.DataFrame:
-    """Splits 'landed of attempted' string into separate numeric columns."""
-    split_df = df[col].astype(str).str.split('of', expand=True)
-    df[new_col_landed] = pd.to_numeric(split_df[0].str.strip(), errors='coerce')
-    df[new_col_attempted] = pd.to_numeric(split_df[1].str.strip(), errors='coerce') if split_df.shape[1] > 1 else np.nan
-    return df
+    # Helper function to enforce float conversion safely
+    def _to_num(val):
+        try:
+            v = float(val)
+            return 0.0 if np.isnan(v) else v
+        except (ValueError, TypeError):
+            return 0.0
 
+    s_diff_1 = _to_num(row.get('standing_sig_strikes_landed_diff_fighter_1', 0))
+    s_tot_1 = _to_num(row.get('standing_sig_strikes_landed_fighter_1', 0)) + _to_num(row.get('standing_sig_strikes_landed_fighter_2', 0))
+    s_mag_raw = max(-1.0, min(1.0, s_diff_1 / (s_tot_1 + 1e-5)))
+    s_mag = max(-0.35, min(0.35, s_mag_raw)) if s_tot_1 < STRIKING_VOLUME_FLOOR else s_mag_raw
 
-def apply_split(df: pd.DataFrame, columns_to_split: list, drop_original: bool = True) -> pd.DataFrame:
-    """Splits a list of strike/grappling columns into '_landed' and '_attempted' numeric columns."""
-    # CHANGE: Removed df = df.copy().
-    col_mapping = {col: (f"{col}_landed", f"{col}_attempted") for col in columns_to_split}
+    CONTROL_VOLUME_FLOOR = 12
+    c_diff_1 = _to_num(row.get('ctrl_in_secs_diff_fighter_1', 0))
+    c_tot_1 = _to_num(row.get('ctrl_in_secs_fighter_1', 0)) + _to_num(row.get('ctrl_in_secs_fighter_2', 0))
+    c_mag_raw = max(-1.0, min(1.0, c_diff_1 / (c_tot_1 + 1e-5)))
+    c_mag = max(-0.35, min(0.35, c_mag_raw)) if c_tot_1 < CONTROL_VOLUME_FLOOR else c_mag_raw
 
-    for col, (landed_col, attempted_col) in col_mapping.items():
-        if col in df.columns:
-            df = split_strike_column(df, col, landed_col, attempted_col)
+    td_landed_1 = _to_num(row.get('td_landed_fighter_1', 0))
+    td_landed_2 = _to_num(row.get('td_landed_fighter_2', 0))
 
-    if drop_original:
-        df = df.drop(columns=[col for col in col_mapping.keys() if col in df.columns])
+    if td_landed_1 > td_landed_2:
+        td_mag = _dominance_magnitude(td_landed_1, td_landed_2, count_threshold=3.5, prop_threshold=0.80)
+    elif td_landed_2 > td_landed_1:
+        td_mag = -_dominance_magnitude(td_landed_2, td_landed_1, count_threshold=3.5, prop_threshold=0.80)
+    else:
+        td_mag = 0.0
 
-    return df
+    sub_att_1 = _to_num(row.get('sub_att_fighter_1', 0))
+    sub_att_2 = _to_num(row.get('sub_att_fighter_2', 0))
+    sub_diff_1 = sub_att_1 - sub_att_2
 
-def calculate_age(df: pd.DataFrame, dob_col: str = 'DOB', date_col: str = 'event_date') -> pd.DataFrame:
-    """Calculates fighter age in years on fight day from DOB and event_date."""
-    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+    if sub_att_1 > sub_att_2:
+        sub_mag = _dominance_magnitude(sub_att_1, sub_att_2, count_threshold=2.5, prop_threshold=0.75)
+    elif sub_att_2 > sub_att_1:
+        sub_mag = -_dominance_magnitude(sub_att_2, sub_att_1, count_threshold=2.5, prop_threshold=0.75)
+    else:
+        sub_mag = 0.0
 
-    dob_cleaned = df[dob_col].astype(str).str.strip().replace('--', np.nan)
-    # Flexible parsing to handle both raw scraped ('Oct 30, 1986') and timestamp strings ('1984-05-16 00:00:00')
-    dob_parsed = pd.to_datetime(dob_cleaned, errors='coerce')
+    kd_diff_1 = _to_num(row.get('kd_diff_fighter_1', 0))
+    kd_mag = max(-1.0, min(1.0, kd_diff_1 / (abs(kd_diff_1) + 1.0)))
 
-    # Calculate fight day age
-    df['fight_day_age (yrs)'] = (df[date_col] - dob_parsed).dt.days / 365.25
+    magnitudes_1 = [s_mag, c_mag, td_mag, sub_mag, kd_mag]
 
-    # Standardize DOB column to YYYY-MM-DD format
-    df[dob_col] = dob_parsed.dt.strftime('%Y-%m-%d')
+    # Classification uses a ROUNDED copy, separate from the raw magnitudes
+    # that feed pdi_1/pdi_2 below. _dominance_magnitude's soft blend
+    # (td_mag/sub_mag) can never return EXACTLY its 0.35 "close" cap for a
+    # shutout (0 landed against) -- decisive_weight is a product of two
+    # sigmoids, which approach but never mathematically reach 0, so a
+    # landed count safely below its count_threshold can still leak a
+    # fractional decisive contribution (e.g. 1 landed vs 0, threshold 3.5,
+    # evaluates to 0.35000000000886, not 0.35 -- 12 decimal places of
+    # sigmoid noise, not a real signal, previously misclassifying a close
+    # win as decisive). Rounding to the same 3-decimal precision pdi_margin
+    # itself uses elsewhere in this function makes that noise vanish before
+    # classification, while genuine near-threshold signal (2 landed vs 0
+    # against a 2.5 threshold legitimately evaluates to 0.354) survives
+    # rounding and still correctly reads as decisive.
+    classification_magnitudes_1 = [round(m, 3) for m in magnitudes_1]
 
-    return df
+    decisive_wins_1 = sum(1 for m in classification_magnitudes_1 if m > 0.35)
+    close_wins_1 = sum(1 for m in classification_magnitudes_1 if 0.0 < m <= 0.35)
+    ties = sum(1 for m in classification_magnitudes_1 if m == 0.0)
+    close_losses_1 = sum(1 for m in classification_magnitudes_1 if -0.35 <= m < 0.0)
+    decisive_losses_1 = sum(1 for m in classification_magnitudes_1 if m < -0.35)
 
-def process_control_time(df: pd.DataFrame, col: str = 'ctrl') -> pd.DataFrame:
-    """Converts control time string 'MM:SS' into integer seconds."""
-    # CHANGE: Refactored individual string logic into a vectorized structural operation to process all rows at once.
-    if col in df.columns:
-        time_parts = df[col].astype(str).str.split(':', expand=True)
-        if time_parts.shape[1] == 2:
-            df['ctrl_in_secs'] = (
-                pd.to_numeric(time_parts[0], errors='coerce').fillna(0) * 60 +
-                pd.to_numeric(time_parts[1], errors='coerce').fillna(0)
-            )
-        else:
-            df['ctrl_in_secs'] = 0
-        df = df.drop(columns=[col])
-    return df
+    decisive_wins_2 = sum(1 for m in classification_magnitudes_1 if m < -0.35)
+    close_wins_2 = sum(1 for m in classification_magnitudes_1 if -0.35 <= m < 0.0)
+    close_losses_2 = sum(1 for m in classification_magnitudes_1 if 0.0 < m <= 0.35)
+    decisive_losses_2 = sum(1 for m in classification_magnitudes_1 if m > 0.35)
 
+    pdi_1 = sum(max(0.0, m) for m in magnitudes_1)
+    pdi_2 = sum(max(0.0, -m) for m in magnitudes_1)
 
-def convert_pct_to_float(df: pd.DataFrame, col: str) -> pd.DataFrame:
-    """Converts percentage string (e.g. '48%') to float (0.48)."""
-    if col in df.columns:
-        cleaned = df[col].astype(str).replace('---', np.nan).str.rstrip('%')
-        df[col] = pd.to_numeric(cleaned, errors='coerce') / 100.0
-    return df
+    pdi_margin_1 = round(pdi_1 - pdi_2, 3)
+    pdi_margin_2 = round(pdi_2 - pdi_1, 3)
 
+    total_output_diff = s_diff_1 + (c_diff_1 / 60.0) + (kd_diff_1 * 10) + (sub_diff_1 * 5)
+    magnitude_score = round(abs(total_output_diff) / (abs(total_output_diff) + 50.0), 3)
 
-def convert_cols_from_pct_to_float(df: pd.DataFrame, cols_to_convert: list) -> pd.DataFrame:
-    """Applies percentage-to-float conversion across multiple columns."""
-    # CHANGE: Removed df = df.copy().
-    for col in cols_to_convert:
-        df = convert_pct_to_float(df, col)
-    return df
-
-
-# ==============================================================================
-# 5. Reshape to 1-Fight-Per-Row
-# ==============================================================================
-
-def add_suffix_to_fighter_columns(df: pd.DataFrame, number: int, exclude_cols: list = None) -> pd.DataFrame:
-    """Adds suffix '_fighter_1' or '_fighter_2' to fighter-specific metric columns."""
-    # CHANGE: Removed df = df.copy().
-    if exclude_cols is None:
-        exclude_cols = [
-            'event_name', 'event_url', 'event_date', 'weight_class',
-            'fight_url', 'fighter', 'method', 'details', 'time', 'round', 'time_format'
-        ]
-
-    renames = {}
-    for col in df.columns:
-        if col not in exclude_cols:
-            renames[col] = f"{col}_fighter_{number}"
-
-    df = df.rename(columns=renames)
-    df = df.rename(columns={'fighter': f'fighter_{number}'})
-    return df
-
-
-def convert_to_one_fight_one_row(df: pd.DataFrame) -> pd.DataFrame:
-    """Pivots from 2 rows per fight to 1 row per fight with fighter_1 and fighter_2 statistics."""
-    # drop=True: .nth(0)/.nth(1) preserve the original (pre-groupby) row
-    # index, so a bare .reset_index() turns that meaningless row position
-    # into a genuine 'index' column -- it was being silently caught by the
-    # old ordered_columns whitelist at the end of run_etl_pipeline, which
-    # is exactly the failure mode that whitelist was just changed to stop
-    # relying on (see run_etl_pipeline's column-ordering step).
-    f1_df = add_suffix_to_fighter_columns(df.groupby('fight_url').nth(0).reset_index(drop=True), 1)
-    f2_df = add_suffix_to_fighter_columns(df.groupby('fight_url').nth(1).reset_index(drop=True), 2)
-
-    fight_df = f1_df.merge(f2_df, on=['fight_url'])
-    fight_df['bout'] = fight_df['fighter_1'] + ' vs. ' + fight_df['fighter_2']
-
-    # Drop duplicated _y columns from merge and clean _x suffixes
-    fight_df = fight_df.loc[:, ~fight_df.columns.str.endswith('_y')]
-    fight_df = fight_df.rename(columns=lambda x: x[:-2] if x.endswith('_x') else x)
-
-    # Standardize column naming
-    fight_df = fight_df.rename(columns={
-        'DOB_fighter_1': 'date_of_birth_fighter_1',
-        'DOB_fighter_2': 'date_of_birth_fighter_2',
-        'round': 'round_ended'
+    return pd.Series({
+        'pdi_fighter_1': round(pdi_1, 3),
+        'pdi_fighter_2': round(pdi_2, 3),
+        'pdi_margin_fighter_1': pdi_margin_1,
+        'pdi_margin_fighter_2': pdi_margin_2,
+        'fight_magnitude_score': magnitude_score,
+        'decisive_wins_fighter_1': decisive_wins_1,
+        'close_wins_fighter_1': close_wins_1,
+        'close_losses_fighter_1': close_losses_1,
+        'decisive_losses_fighter_1': decisive_losses_1,
+        'decisive_wins_fighter_2': decisive_wins_2,
+        'close_wins_fighter_2': close_wins_2,
+        'close_losses_fighter_2': close_losses_2,
+        'decisive_losses_fighter_2': decisive_losses_2,
+        'ties': ties
     })
 
-    return fight_df
+def add_pdi_columns(df):
+    phases = ['who_won_grappling', 'who_won_striking', 'who_won_wrestling', 'who_won_control', 'who_won_standing_danger']
+    pdi_df = df.apply(lambda row: calculate_phase_magnitude_and_pdi(row, phases), axis=1)
+    return pd.concat([df, pdi_df], axis=1)
 
-# ==============================================================================
-# 5b. Event-Date Join Integrity
-# ==============================================================================
+"""## 14. Phase-Level Fighter Strength/Weakness Profiles (added Aug 2026)"""
 
-def drop_rows_with_null_event_date(df: pd.DataFrame, date_col: str = 'event_date',
-                                    id_cols: list = None, verbose: bool = True) -> pd.DataFrame:
+# Twelve phases spanning striking (by target), grappling, power, and finishing
+# tendency. Deliberately NOT collapsed into one blended "skill" number (see
+# discussion notes) -- a single scalar erases exactly the thing this feature
+# exists to show, e.g. an elite wrestler's control dominance disappearing into
+# an average of his middling striking numbers. Built entirely from columns
+# already present in the raw scrape (head/body/leg/ground strikes, td, ctrl_in_secs,
+# sub_att, kd, method) -- no new data collection required.
+PHASE_METRICS = ['head_strikes_acc', 'body_strikes_acc', 'leg_strikes_acc', 'leg_strikes_volume',
+                  'td_offense', 'td_defense', 'control', 'ground_strikes', 'submission_threat',
+                  'knockdown_power', 'ko_finish_rate', 'sub_finish_rate']
+
+def _init_phase_state():
+    return dict(
+        head_landed=0.0, head_att=0.0, body_landed=0.0, body_att=0.0,
+        leg_landed=0.0, leg_att=0.0, leg_time=0.0,
+        td_landed=0.0, td_att=0.0,
+        td_faced=0.0, td_avoided=0.0,
+        ctrl=0.0, ctrl_time=0.0,
+        gs_landed=0.0, gs_time=0.0,
+        sub_att=0.0, sub_time=0.0,
+        kd=0.0, kd_time=0.0,
+        wins=0, ko_wins=0, sub_wins=0,
+    )
+
+def _phase_snapshot(s):
+    def ratio(n, d):
+        return n / d if d > 0 else np.nan
+    return {
+        'head_strikes_acc': ratio(s['head_landed'], s['head_att']),
+        'body_strikes_acc': ratio(s['body_landed'], s['body_att']),
+        'leg_strikes_acc': ratio(s['leg_landed'], s['leg_att']),
+        'leg_strikes_volume': ratio(s['leg_landed'], s['leg_time']),
+        'td_offense': ratio(s['td_landed'], s['td_att']),
+        'td_defense': ratio(s['td_avoided'], s['td_faced']),
+        'control': ratio(s['ctrl'], s['ctrl_time']),
+        'ground_strikes': ratio(s['gs_landed'], s['gs_time']),
+        'submission_threat': ratio(s['sub_att'], s['sub_time']) * 15 if s['sub_time'] > 0 else np.nan,
+        'knockdown_power': ratio(s['kd'], s['kd_time']) * 15 if s['kd_time'] > 0 else np.nan,
+        'ko_finish_rate': ratio(s['ko_wins'], s['wins']),
+        'sub_finish_rate': ratio(s['sub_wins'], s['wins']),
+    }
+
+def add_phase_profile_raw_columns(df):
     """
-    Drops rows with a null event_date and reports exactly what was dropped,
-    rather than silently discarding them.
+    Computes PRE-fight and POST-fight cumulative phase-skill snapshots for
+    both fighters, across the 12 PHASE_METRICS.
 
-    event_date isn't a minor missing-field gap like Height or DOB -- every
-    downstream stage (feature engineering's per-fighter chronological state
-    machines, UDE's temporal calibration) sorts and accumulates state by it,
-    so a null row can't be safely placed in time or processed at all.
-    validate_transformed_data's join-leakage check only monitors an aggregate
-    null *percentage* against a threshold, so a handful of null rows in a
-    large dataset can pass silently; this is a hard, unconditional drop
-    instead, specifically because there's no safe way to process such a row.
+    PRE_FIGHT  = career cumulative average strictly BEFORE this fight ("going
+                 into this fight, they were X").
+    POST_FIGHT = career cumulative average INCLUDING this fight ("coming out
+                 of this fight -- or, on a fighter's last row, at the end of
+                 their career -- they were X").
 
-    A null here almost always means the Event URL left-join in step 2 above
-    found no match in events_df -- typically a newly added event not yet
-    present in the events source, or a naming mismatch. Either way, it's
-    worth a human looking at (the event might be missing real data upstream,
-    not just this one row), not just discarding quietly.
+    Requires df to already be sorted chronologically ascending.
+
+    Column naming: 'phase_{metric}_{pre_fight|post_fight}_fighter_{1|2}' --
+    the temporal token is 'pre_fight'/'post_fight' (not bare 'pre'/'post')
+    so it can't be visually confused with 'fighter', and fighter_{1|2} is
+    always the LAST suffix, consistent with every other fighter-scoped
+    column in this dataset (e.g. dynamic_td_accuracy_fighter_1).
     """
-    if date_col not in df.columns:
-        return df
+    state = {}
+    def get_state(url):
+        if url not in state:
+            state[url] = _init_phase_state()
+        return state[url]
 
-    null_mask = df[date_col].isna()
-    n_dropped = int(null_mask.sum())
-    if n_dropped > 0:
-        if id_cols is None:
-            id_cols = [c for c in ['event_name', 'event_url', 'fight_url', 'bout',
-                                    'fighter_1', 'fighter_2', 'fighter_1_name', 'fighter_2_name']
-                       if c in df.columns]
-        if verbose:
-            print(f"WARNING: Dropping {n_dropped} row(s) with null '{date_col}' "
-                  f"(event-date join found no match) -- investigate the events source:")
-            print(df.loc[null_mask, id_cols].to_string(index=False))
+    pre_cols = {f'phase_{p}_pre_fight_{fc}': [] for p in PHASE_METRICS for fc in ['fighter_1', 'fighter_2']}
+    post_cols = {f'phase_{p}_post_fight_{fc}': [] for p in PHASE_METRICS for fc in ['fighter_1', 'fighter_2']}
 
-    return df.loc[~null_mask].reset_index(drop=True)
+    for row in df.itertuples(index=False):
+        method_raw = getattr(row, 'method')
+        tt = getattr(row, 'total_time_in_mins')
+        for f_col, opp_col in [('fighter_1', 'fighter_2'), ('fighter_2', 'fighter_1')]:
+            f_url = getattr(row, f'fighter_url_{f_col}')
+            result = getattr(row, f'fight_result_{f_col}')
+            s = get_state(f_url)
+            pre = _phase_snapshot(s)
+            for p in PHASE_METRICS:
+                pre_cols[f'phase_{p}_pre_fight_{f_col}'].append(pre[p])
+
+            if pd.notna(tt) and tt > 0:
+                head_l, head_a = getattr(row, f'head_strikes_landed_{f_col}'), getattr(row, f'head_strikes_attempted_{f_col}')
+                body_l, body_a = getattr(row, f'body_strikes_landed_{f_col}'), getattr(row, f'body_strikes_attempted_{f_col}')
+                leg_l, leg_a = getattr(row, f'leg_strikes_landed_{f_col}'), getattr(row, f'leg_strikes_attempted_{f_col}')
+                td_l, td_a = getattr(row, f'td_landed_{f_col}'), getattr(row, f'td_attempted_{f_col}')
+                opp_td_l, opp_td_a = getattr(row, f'td_landed_{opp_col}'), getattr(row, f'td_attempted_{opp_col}')
+                ctrl = getattr(row, f'ctrl_in_secs_{f_col}')
+                gs = getattr(row, f'ground_strikes_landed_{f_col}')
+                sub = getattr(row, f'sub_att_{f_col}')
+                kd = getattr(row, f'kd_{f_col}')
+
+                s['head_landed'] += head_l; s['head_att'] += head_a
+                s['body_landed'] += body_l; s['body_att'] += body_a
+                s['leg_landed'] += leg_l; s['leg_att'] += leg_a; s['leg_time'] += tt
+                s['td_landed'] += td_l; s['td_att'] += td_a
+                s['td_faced'] += opp_td_a; s['td_avoided'] += max(0, opp_td_a - opp_td_l)
+                s['ctrl'] += ctrl; s['ctrl_time'] += tt
+                s['gs_landed'] += gs; s['gs_time'] += tt
+                s['sub_att'] += sub; s['sub_time'] += tt
+                s['kd'] += kd; s['kd_time'] += tt
+                if result == 'W':
+                    s['wins'] += 1
+                    if method_raw == 'KO/TKO': s['ko_wins'] += 1
+                    elif method_raw == 'Submission': s['sub_wins'] += 1
+
+            post = _phase_snapshot(s)
+            for p in PHASE_METRICS:
+                post_cols[f'phase_{p}_post_fight_{f_col}'].append(post[p])
+
+    new_cols = {**pre_cols, **post_cols}
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
 
-# ==============================================================================
-# 6. ETL Pipeline validator
-# ==============================================================================
-def validate_transformed_data(df: pd.DataFrame, max_null_pct: float = 0.05, verbose: bool = True) -> None:
+def _phase_windowed_percentile(d, col, weight_class_col='weight_class_cleaned',
+                                date_col='event_date', window_years=3, min_cohort=5):
     """
-    Executes post-transformation sanity checks on the processed dataset.
-    Prints status updates for each check and raises warnings/errors if invariants are violated.
+    Percentile rank of each row's value against its CONTEMPORARIES only: rows
+    in the same weight class whose event_date falls within +/- window_years.
+    This is the 'era' percentile, kept alongside (not instead of) the
+    full-history percentile because some phase metrics drift substantially
+    over the sport's history (e.g. leg-kick volume has risen ~40% since
+    2010) while others don't (e.g. control-time rate has actually *fallen*
+    ~34% since the early 2000s) -- ranking a fighter against the sport's
+    entire multi-decade history can meaningfully understate or overstate
+    them depending on which direction their era drifted, and there's no way
+    to know which, for a given fighter/metric, without computing both.
+    Rows with fewer than `min_cohort` contemporaries are left NaN.
     """
-    import warnings
-
-    if verbose:
-        print("\n" + "=" * 50)
-        print(" RUNNING ETL DATA VALIDATION SUITE")
-        print("=" * 50)
-
-    checks_executed = 0
-
-    # 1. Primary Key Uniqueness
-    if 'fight_url' in df.columns:
-        if not df['fight_url'].is_unique:
-            duplicates = df['fight_url'].duplicated().sum()
-            raise ValueError(f"❌ [FAIL] Primary Key Check: 'fight_url' contains {duplicates} duplicate records.")
-        checks_executed += 1
-        if verbose:
-            print("✓ [PASS] Primary Key Uniqueness (fight_url)")
-
-    # 2. Logical Invariant: Landed <= Attempted
-    strike_cols = [c.replace('_landed_', '') for c in df.columns if '_landed_' in c]
-    for base in set(strike_cols):
-        l_col, a_col = f"{base}_landed_fighter_1", f"{base}_attempted_fighter_1"
-        if l_col in df.columns and a_col in df.columns:
-            invalid_rows = (df[l_col] > df[a_col]).sum()
-            if invalid_rows > 0:
-                raise ValueError(f"❌ [FAIL] Logical Invariant Check: Found {invalid_rows} rows where {l_col} > {a_col}.")
-    checks_executed += 1
-    if verbose:
-        print("✓ [PASS] Logical Invariants (Landed <= Attempted)")
-
-    # 3. Physiological Bounds Checks
-    age_cols = [c for c in df.columns if 'fight_day_age' in c]
-    age_warnings = 0
-    for col in age_cols:
-        invalid_ages = df[(df[col] < 18) | (df[col] > 65)][col].count()
-        if invalid_ages > 0:
-            age_warnings += invalid_ages
-            warnings.warn(f"Data Quality Warning: Found {invalid_ages} fighters with age outside [18, 65] in {col}.")
-    checks_executed += 1
-    if verbose:
-        status = "✓ [PASS] Physiological Bounds (Ages 18–65)" if age_warnings == 0 else f"⚠️ [WARN] Physiological Bounds ({age_warnings} outliers flagged)"
-        print(status)
-
-    # 4. Control Time Upper Bound
-    ctrl_cols = [c for c in df.columns if 'ctrl_in_secs' in c]
-    ctrl_warnings = 0
-    for col in ctrl_cols:
-        invalid_ctrl = (df[col] > 1500).sum()
-        if invalid_ctrl > 0:
-            ctrl_warnings += invalid_ctrl
-            warnings.warn(f"Data Quality Warning: Found {invalid_ctrl} rows with control time > 1500s in {col}.")
-    checks_executed += 1
-    if verbose:
-        status = "✓ [PASS] Control Time Bounds (<= 1500s)" if ctrl_warnings == 0 else f"⚠️ [WARN] Control Time Bounds ({ctrl_warnings} outliers flagged)"
-        print(status)
-
-    # 5. Join Leakage Check (Excessive Nulls in Critical Columns)
-    critical_cols = ['event_date', 'Height (m)_fighter_1', 'date_of_birth_fighter_1']
-    null_warnings = 0
-    for col in critical_cols:
-        if col in df.columns:
-            null_pct = df[col].isna().mean()
-            if null_pct > max_null_pct:
-                null_warnings += 1
-                warnings.warn(f"Data Quality Warning: '{col}' has {null_pct:.1%} null values (exceeds threshold of {max_null_pct:.1%}).")
-    checks_executed += 1
-    if verbose:
-        status = f"✓ [PASS] Join Coverage (<{max_null_pct:.0%} Nulls)" if null_warnings == 0 else f"⚠️ [WARN] Join Coverage ({null_warnings} columns exceeded null threshold)"
-        print(status)
-
-    if verbose:
-        print("-" * 50)
-        print(f"Validation Complete: {checks_executed} quality suites executed.")
-        print("=" * 50 + "\n")
+    window_days = int(window_years * 365.25)
+    dates_all = pd.to_datetime(d[date_col]).apply(lambda x: x.toordinal() if pd.notna(x) else np.nan)
+    out = np.full(len(d), np.nan)
+    for wc, g in d.groupby(weight_class_col):
+        gg = g.dropna(subset=[col])
+        gg_dates = dates_all.loc[gg.index]
+        order = gg_dates.sort_values().index
+        dates_sorted = gg_dates.loc[order].values
+        vals_sorted = gg.loc[order, col].values
+        for pos, idx in enumerate(order):
+            lo = np.searchsorted(dates_sorted, dates_sorted[pos] - window_days, side='left')
+            hi = np.searchsorted(dates_sorted, dates_sorted[pos] + window_days, side='right')
+            cohort = vals_sorted[lo:hi]
+            if len(cohort) < min_cohort:
+                continue
+            out[d.index.get_loc(idx)] = (cohort <= vals_sorted[pos]).mean()
+    return out
 
 
-# ==============================================================================
-# 7. Master ETL Pipeline Function
-# ==============================================================================
+def add_phase_profile_percentiles(df, window_years=3):
+    """
+    Adds full-history and era-windowed percentile ranks (within weight class)
+    for every phase_{p}_{pre_fight|post_fight}_fighter_{1|2} raw column. Both
+    flavors are kept side by side deliberately -- see
+    _phase_windowed_percentile docstring.
 
-def run_etl_pipeline(
-    scraped_fights_df: pd.DataFrame,
-    events_df: pd.DataFrame,
-    fighters_df: pd.DataFrame,
-    current_dataset: pd.DataFrame = None
+    Output column pattern:
+    'phase_{metric}_{pre_fight|post_fight}_pctile_{full|era}_fighter_{1|2}'
+    -- fighter_{1|2} always LAST, consistent with every other fighter-scoped
+    column in this pipeline (e.g. dynamic_sig_strikes_accuracy_fighter_1,
+    opponent_quality_delta_fighter_1).
+    """
+    new_cols = {}
+    for p in PHASE_METRICS:
+        for suffix in ['pre_fight', 'post_fight']:
+            for f_col in ['fighter_1', 'fighter_2']:
+                raw_col = f'phase_{p}_{suffix}_{f_col}'
+                new_cols[f'phase_{p}_{suffix}_pctile_full_{f_col}'] = df.groupby('weight_class_cleaned')[raw_col].rank(pct=True)
+                new_cols[f'phase_{p}_{suffix}_pctile_era_{f_col}'] = _phase_windowed_percentile(df, raw_col, window_years=window_years)
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
+
+"""## Master Orchestration Function"""
+
+def engineer_all_features(
+    df: pd.DataFrame,
+    include_phase_profiles: bool = False,
+    include_phase_profile_percentiles: bool = False,
+    phase_profile_percentile_window_years: int = 3,
 ) -> pd.DataFrame:
     """
-    Master ETL pipeline that processes scraped fight data and merges with event and fighter details.
+    Master pipeline executing feature engineering transformations via dictionary batching.
+
+    Args:
+        include_phase_profiles: If False (default), skips the 12-phase
+            pre/post-fight raw snapshot columns entirely (48 columns) and
+            the percentile columns that depend on them. Off by default
+            because these aren't currently consumed downstream (not in
+            ude_points_algorithm.py) and roughly double the dataset's
+            column count.
+        include_phase_profile_percentiles: Only relevant when
+            include_phase_profiles=True. Lets you get the 48 raw columns
+            without paying for the 96 percentile columns (full + era, x2
+            fighters, x12 metrics), which are the more expensive half —
+            the era-windowed rank does a per-row search over each
+            weight-class cohort.
+        phase_profile_percentile_window_years: Passed through to the era
+            percentile calculation.
     """
-    # 1. Process fighter biographical features (Height, Weight, Reach)
-    fighters_clean = process_fighter_bio(fighters_df)
+    df = df.copy()
 
-    # 2. Merge event date into scraped fight data
-    events_subset = events_df[['URL', 'DATE']].drop_duplicates(subset=['URL'])
-    df = pd.merge(scraped_fights_df, events_subset, left_on='Event URL', right_on='URL', how='left')
-    df = df.drop(columns=['URL'], errors='ignore')
-    df = df.rename(columns={'DATE': 'Event Date'})
-    df = df.loc[:, ~df.columns.duplicated()]
+    if 'event_date' in df.columns:
+        df['event_date'] = pd.to_datetime(df['event_date'])
+        # Safety net: dataset_processing_pipeline.run_etl_pipeline already
+        # drops+reports null event_date rows at the source (the event-date
+        # join). Re-checking here too in case this df didn't come through
+        # that path -- every chronological state machine below assumes a
+        # valid, sortable date on every row.
+        df = drop_rows_with_null_event_date(df)
 
-    # 3. Standardize column names
-    df = standardize_columns(df, strike=True)
+    df = df.sort_values(by='event_date', ascending=True).reset_index(drop=True)
 
-    # 3b. Drop rows the event-date join above failed to match, before any
-    # further processing wastes work on rows that can't be safely placed in
-    # time anyway. See drop_rows_with_null_event_date's docstring.
-    df = drop_rows_with_null_event_date(df)
-
-    # 4. Rearrange columns for row splitting
-    # CHANGE: Explicit definition of the exact stats being split, fed directly into the splitter.
-    stat_cols = [
-        'fighter', 'kd', 'sig_strikes', 'sig_strikes_pct', 'total_strikes',
-        'td', 'td_pct', 'sub_att', 'rev', 'ctrl', 'head_strikes', 'body_strikes',
-        'leg_strikes', 'distance_strikes', 'clinch_strikes', 'ground_strikes'
+    # Defensive NaN guard for the raw landed/attempted stat columns consumed
+    # by update_career_means, add_dynamic_strike_accuracy/defence, and
+    # add_dynamic_td_accuracy/defence: each accumulates a running per-fighter
+    # total via `+=` with no NaN check, so a single NaN input would silently
+    # poison that fighter's cumulative total -- and every derived column for
+    # them -- to NaN for the remainder of their career. Not currently
+    # triggered (verified zero NaN across these columns in the live dataset)
+    # but unguarded, and the failure mode is exactly the shape of this
+    # project's one confirmed bug class (a silent, cascading NaN). Filling
+    # to 0 here matches _to_num's existing NaN-as-0 convention used in
+    # calculate_phase_magnitude_and_pdi below.
+    _cumulative_stat_cols = [
+        f'{stat}_fighter_{side}'
+        for stat in ('sig_strikes_landed', 'sig_strikes_attempted', 'td_landed', 'td_attempted',
+                     'head_strikes_landed', 'head_strikes_attempted',
+                     'body_strikes_landed', 'body_strikes_attempted',
+                     'leg_strikes_landed', 'leg_strikes_attempted')
+        for side in (1, 2)
     ]
-    meta_cols = [
-        'fighter_1_name', 'fighter_1_url', 'fighter_1_result',
-        'fighter_2_name', 'fighter_2_url', 'fighter_2_result',
-        'event_name', 'event_url', 'event_date', 'weight_class', 'fight_url',
-        'method', 'details', 'round', 'time', 'time_format'
-    ]
-    existing_split_cols = [c for c in stat_cols + meta_cols if c in df.columns]
-    df_to_be_split = df.loc[:, existing_split_cols].copy()
+    present = [c for c in _cumulative_stat_cols if c in df.columns]
+    df[present] = df[present].fillna(0)
 
-    # 5. Split multi-line fight stats to two rows (1 per fighter)
-    modified_df = split_fight_stats(df_to_be_split, stat_cols=stat_cols)
-    modified_df_clean = clean_modified_df(modified_df)
+    # 1. Title bout column
+    df = create_is_title_bout_column(df)
 
-    # 6. Merge fighter bio details (DOB, Height, Weight, Reach, Stance)
-    bio_cols = ['URL', 'DOB', 'Height (m)', 'Weight (lbs)', 'Reach (in)', 'STANCE']
-    bio_subset = fighters_clean[[c for c in bio_cols if c in fighters_clean.columns]].drop_duplicates(subset=['URL'])
-    df_with_bio = pd.merge(modified_df_clean, bio_subset, left_on='fighter_url', right_on='URL', how='left')
-    df_with_bio = df_with_bio.drop(columns=['URL'], errors='ignore')
+    # 2. Weight class cleaning
+    if 'weight_class' in df.columns:
+        df['weight_class_cleaned'] = df['weight_class'].apply(map_weight_class)
 
-    # 7. Split 'X of Y' strikes and takedowns into numeric landed and attempted columns
-    columns_to_split = [
-        'sig_strikes', 'total_strikes', 'td', 'head_strikes', 'body_strikes',
-        'leg_strikes', 'distance_strikes', 'clinch_strikes', 'ground_strikes'
-    ]
-    df_split = apply_split(df_with_bio, columns_to_split)
+    # 3. Champion status & Title defenses
+    df = update_champion_status(df)
+    df = update_title_defenses(df)
 
-    # 8. Calculate fight day age
-    df_split = calculate_age(df_split, dob_col='DOB', date_col='event_date')
+    # 4. Fight records & Streaks
+    df = update_fight_records(df)
+    df = update_win_streaks(df)
 
-    # 9. Process control time to seconds
-    # CHANGE: Call the new vectorized processing function instead of iterating values via lambda.
-    df_split = process_control_time(df_split, col='ctrl')
+    # 4b. Opponent quality scores. Must run after champion status, title
+    # defenses, and fight records above; must run before UDE scoring, since
+    # ude_points_algorithm's temporal method x PDI calibration reads these
+    # columns before any UDE points are computed (see docstring).
+    df = add_quality_score_columns(df)
 
-    # 10. Fix percentage columns to numeric floats
-    pct_cols = ['td_pct', 'sig_strikes_pct']
-    df_pct_fixed = convert_cols_from_pct_to_float(df_split, pct_cols)
+    # 5. Career means
+    df = update_career_means(df)
 
-    # 11. Reshape from 2 rows per fight to 1 row per fight
-    final_df = convert_to_one_fight_one_row(df_pct_fixed)
+    # 6. Method cleaning
+    if 'method' in df.columns:
+        df['method_mapped'] = df['method'].apply(map_fight_method)
 
-    # Validate output schema & values before column ordering
-    validate_transformed_data(final_df)
+    # 7. Rematches
+    df = add_rematch_features(df)
 
-    # 12. Standard desired column ordering
-    ordered_columns = [
-        'event_name', 'event_url', 'event_date', 'bout', 'fight_url',
-        'weight_class', 'time_format', 'method', 'details', 'time', 'round_ended',
-        'fighter_1', 'fight_day_age (yrs)_fighter_1', 'fight_result_fighter_1',
-        'kd_fighter_1', 'sig_strikes_landed_fighter_1',
-        'sig_strikes_attempted_fighter_1', 'sig_strikes_pct_fighter_1',
-        'total_strikes_landed_fighter_1', 'total_strikes_attempted_fighter_1',
-        'td_landed_fighter_1', 'td_attempted_fighter_1', 'td_pct_fighter_1',
-        'head_strikes_landed_fighter_1', 'head_strikes_attempted_fighter_1',
-        'body_strikes_landed_fighter_1', 'body_strikes_attempted_fighter_1',
-        'leg_strikes_landed_fighter_1', 'leg_strikes_attempted_fighter_1',
-        'distance_strikes_landed_fighter_1', 'distance_strikes_attempted_fighter_1',
-        'clinch_strikes_landed_fighter_1', 'clinch_strikes_attempted_fighter_1',
-        'ground_strikes_landed_fighter_1', 'ground_strikes_attempted_fighter_1',
-        'sub_att_fighter_1', 'rev_fighter_1', 'ctrl_in_secs_fighter_1',
-        'fighter_url_fighter_1', 'date_of_birth_fighter_1',
-        'Height (m)_fighter_1', 'Weight (lbs)_fighter_1', 'Reach (in)_fighter_1',
-        'STANCE_fighter_1',
-        'fighter_2', 'fight_day_age (yrs)_fighter_2', 'fight_result_fighter_2',
-        'kd_fighter_2', 'sig_strikes_landed_fighter_2',
-        'sig_strikes_attempted_fighter_2', 'sig_strikes_pct_fighter_2',
-        'total_strikes_landed_fighter_2', 'total_strikes_attempted_fighter_2',
-        'td_landed_fighter_2', 'td_attempted_fighter_2', 'td_pct_fighter_2',
-        'head_strikes_landed_fighter_2', 'head_strikes_attempted_fighter_2',
-        'body_strikes_landed_fighter_2', 'body_strikes_attempted_fighter_2',
-        'leg_strikes_landed_fighter_2', 'leg_strikes_attempted_fighter_2',
-        'distance_strikes_landed_fighter_2', 'distance_strikes_attempted_fighter_2',
-        'clinch_strikes_landed_fighter_2', 'clinch_strikes_attempted_fighter_2',
-        'ground_strikes_landed_fighter_2', 'ground_strikes_attempted_fighter_2',
-        'sub_att_fighter_2', 'rev_fighter_2', 'ctrl_in_secs_fighter_2',
-        'fighter_url_fighter_2', 'date_of_birth_fighter_2',
-        'Height (m)_fighter_2', 'Weight (lbs)_fighter_2', 'Reach (in)_fighter_2',
-        'STANCE_fighter_2'
-    ]
-    # Columns not named in ordered_columns are APPENDED, not dropped. By
-    # this point in the pipeline every column present was deliberately
-    # constructed by an earlier step -- there's no leftover junk left to
-    # filter out here, so this list's real job is fixing a readable order
-    # for the columns people care about seeing first, not deciding what
-    # belongs in the output. A strict whitelist silently dropped a column
-    # (STANCE) that a genuine upstream step had already added; appending
-    # unlisted columns instead means a future addition shows up (at the
-    # end) rather than vanishing if someone forgets to list it here too.
-    present_cols = [c for c in ordered_columns if c in final_df.columns]
-    remaining_cols = [c for c in final_df.columns if c not in ordered_columns]
-    final_df = final_df.loc[:, present_cols + remaining_cols]
+    # 8. Static & Dynamic Defense/Accuracy
+    df = add_defense_columns(df)
+    df = add_dynamic_strike_accuracy(df)
+    df = add_dynamic_strike_defence(df)
+    df = add_dynamic_td_accuracy(df)
+    df = add_dynamic_td_defence(df)
 
-    # 13. Optional: merge/append with existing historical dataset
-    if current_dataset is not None and not current_dataset.empty:
-        curr_df = current_dataset.copy()
-        cols_to_drop = set(curr_df.columns) - set(final_df.columns)
-        if cols_to_drop:
-            curr_df = curr_df.drop(columns=list(cols_to_drop))
-        final_df = pd.concat([curr_df, final_df], ignore_index=True)
+    # 9. Standing significant strikes (must run before per-minute rates below,
+    # which scan df.columns for every *_landed/*_attempted column still
+    # present -- standing_sig_strikes_landed_per_min would otherwise silently
+    # never get generated since its source column wouldn't exist yet)
+    df = add_standing_sig_strikes_columns(df)
 
-    # Ensure event_date is datetime and sort descending
-    if 'event_date' in final_df.columns:
-        final_df['event_date'] = pd.to_datetime(final_df['event_date'], errors='coerce')
-        # Re-check for null event_date here too, not just on the freshly-scraped
-        # df back in step 3b: current_dataset (just merged in above) may itself
-        # carry rows with a null/unparseable event_date from before this check
-        # existed, and errors='coerce' just above can turn an unparseable date
-        # string into a fresh NaT. Without this, run_etl_pipeline's own output
-        # could still contain null-date rows despite step 3b's check having
-        # already run -- only appearing clean for freshly-scraped data.
-        final_df = drop_rows_with_null_event_date(final_df)
-        final_df = final_df.sort_values(by='event_date', ascending=False).reset_index(drop=True)
+    # 10. Time calculations & per-minute rates
+    df = add_time_and_per_min_features(df)
 
-    return final_df
+    # 11. Differentials & Dominance Features
+    df = process_dominance_differentials(df)
+    df = add_who_won_col(df)
+    df = add_dominance_columns(df)
+    df = add_pdi_columns(df)
 
+    # 12. Phase-level fighter strength/weakness profiles (pre/post-fight,
+    # full-history + era-windowed percentiles). Must run while still sorted
+    # ascending, like everything else above.
+    if include_phase_profiles:
+        df = add_phase_profile_raw_columns(df)
+        if include_phase_profile_percentiles:
+            df = add_phase_profile_percentiles(df, window_years=phase_profile_percentile_window_years)
 
-# if __name__ == "__main__":
-#     import argparse
+    df = df.sort_values(by='event_date', ascending=False).reset_index(drop=True)
 
-#     parser = argparse.ArgumentParser(description="Run UFC Fight Data ETL Pipeline")
-#     parser.add_argument("--fights", required=True, help="Path to scraped fight data CSV")
-#     parser.add_argument("--events", required=True, help="Path to events CSV (ufc_event_details.csv)")
-#     parser.add_argument("--fighters", required=True, help="Path to fighters bio CSV")
-#     parser.add_argument("--current", required=False, default=None, help="Path to existing dataset to append to")
-#     parser.add_argument("--output", required=False, default="fights_ready_for_features.csv", help="Output path")
-
-#     args = parser.parse_args()
-
-#     scraped_df = pd.read_csv(args.fights)
-#     events_df = pd.read_csv(args.events)
-#     fighters_df = pd.read_csv(args.fighters)
-#     curr_df = pd.read_csv(args.current) if args.current else None
-
-#     processed_df = run_etl_pipeline(
-#         scraped_fights_df=scraped_df,
-#         events_df=events_df,
-#         fighters_df=fighters_df,
-#         current_dataset=curr_df
-#     )
-
-#     processed_df.to_csv(args.output, index=False)
-#     print(f"ETL completed successfully! Output saved to: {args.output}")
+    return df
