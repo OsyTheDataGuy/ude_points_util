@@ -706,16 +706,32 @@ def calculate_phase_magnitude_and_pdi(row, phases):
 
     magnitudes_1 = [s_mag, c_mag, td_mag, sub_mag, kd_mag]
 
-    decisive_wins_1 = sum(1 for m in magnitudes_1 if m > 0.35)
-    close_wins_1 = sum(1 for m in magnitudes_1 if 0.0 < m <= 0.35)
-    ties = sum(1 for m in magnitudes_1 if m == 0.0)
-    close_losses_1 = sum(1 for m in magnitudes_1 if -0.35 <= m < 0.0)
-    decisive_losses_1 = sum(1 for m in magnitudes_1 if m < -0.35)
+    # Classification uses a ROUNDED copy, separate from the raw magnitudes
+    # that feed pdi_1/pdi_2 below. _dominance_magnitude's soft blend
+    # (td_mag/sub_mag) can never return EXACTLY its 0.35 "close" cap for a
+    # shutout (0 landed against) -- decisive_weight is a product of two
+    # sigmoids, which approach but never mathematically reach 0, so a
+    # landed count safely below its count_threshold can still leak a
+    # fractional decisive contribution (e.g. 1 landed vs 0, threshold 3.5,
+    # evaluates to 0.35000000000886, not 0.35 -- 12 decimal places of
+    # sigmoid noise, not a real signal, previously misclassifying a close
+    # win as decisive). Rounding to the same 3-decimal precision pdi_margin
+    # itself uses elsewhere in this function makes that noise vanish before
+    # classification, while genuine near-threshold signal (2 landed vs 0
+    # against a 2.5 threshold legitimately evaluates to 0.354) survives
+    # rounding and still correctly reads as decisive.
+    classification_magnitudes_1 = [round(m, 3) for m in magnitudes_1]
 
-    decisive_wins_2 = sum(1 for m in magnitudes_1 if m < -0.35)
-    close_wins_2 = sum(1 for m in magnitudes_1 if -0.35 <= m < 0.0)
-    close_losses_2 = sum(1 for m in magnitudes_1 if 0.0 < m <= 0.35)
-    decisive_losses_2 = sum(1 for m in magnitudes_1 if m > 0.35)
+    decisive_wins_1 = sum(1 for m in classification_magnitudes_1 if m > 0.35)
+    close_wins_1 = sum(1 for m in classification_magnitudes_1 if 0.0 < m <= 0.35)
+    ties = sum(1 for m in classification_magnitudes_1 if m == 0.0)
+    close_losses_1 = sum(1 for m in classification_magnitudes_1 if -0.35 <= m < 0.0)
+    decisive_losses_1 = sum(1 for m in classification_magnitudes_1 if m < -0.35)
+
+    decisive_wins_2 = sum(1 for m in classification_magnitudes_1 if m < -0.35)
+    close_wins_2 = sum(1 for m in classification_magnitudes_1 if -0.35 <= m < 0.0)
+    close_losses_2 = sum(1 for m in classification_magnitudes_1 if 0.0 < m <= 0.35)
+    decisive_losses_2 = sum(1 for m in classification_magnitudes_1 if m > 0.35)
 
     pdi_1 = sum(max(0.0, m) for m in magnitudes_1)
     pdi_2 = sum(max(0.0, -m) for m in magnitudes_1)
