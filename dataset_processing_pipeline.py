@@ -15,10 +15,14 @@ from datetime import datetime
 
 def process_fighter_bio(fighters_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Cleans HEIGHT, WEIGHT, and REACH from raw fighter profile data.
+    Cleans HEIGHT, WEIGHT, REACH, and STANCE from raw fighter profile data.
     - HEIGHT: converted from feet/inches (e.g. 5' 11") to meters (float)
     - WEIGHT: converted from lbs string (e.g. '155 lbs.') to float
     - REACH: converted from inches string (e.g. '72"') to float
+    - STANCE: passed through as-is (already a clean categorical string),
+      exposed as 'Stance' to match the Title Case naming of the other
+      derived bio fields (Height (m), Weight (lbs), Reach (in)) rather
+      than the all-caps raw scrape column name.
     """
     # CHANGE: Maintained one copy here at the ingestion point, removed downstream copies.
     df = fighters_df.copy()
@@ -39,6 +43,9 @@ def process_fighter_bio(fighters_df: pd.DataFrame) -> pd.DataFrame:
 
     if 'REACH' in df.columns:
         df['Reach (in)'] = df['REACH'].astype(str).str.extract(r'(\d+)').astype(float)
+
+    if 'STANCE' in df.columns:
+        df['Stance'] = df['STANCE']
 
     return df
 
@@ -437,7 +444,7 @@ def run_etl_pipeline(
     modified_df_clean = clean_modified_df(modified_df)
 
     # 6. Merge fighter bio details (DOB, Height, Weight, Reach, Stance)
-    bio_cols = ['URL', 'DOB', 'Height (m)', 'Weight (lbs)', 'Reach (in)', 'STANCE']
+    bio_cols = ['URL', 'DOB', 'Height (m)', 'Weight (lbs)', 'Reach (in)', 'Stance']
     bio_subset = fighters_clean[[c for c in bio_cols if c in fighters_clean.columns]].drop_duplicates(subset=['URL'])
     df_with_bio = pd.merge(modified_df_clean, bio_subset, left_on='fighter_url', right_on='URL', how='left')
     df_with_bio = df_with_bio.drop(columns=['URL'], errors='ignore')
@@ -484,7 +491,7 @@ def run_etl_pipeline(
         'sub_att_fighter_1', 'rev_fighter_1', 'ctrl_in_secs_fighter_1',
         'fighter_url_fighter_1', 'date_of_birth_fighter_1',
         'Height (m)_fighter_1', 'Weight (lbs)_fighter_1', 'Reach (in)_fighter_1',
-        'STANCE_fighter_1',
+        'Stance_fighter_1',
         'fighter_2', 'fight_day_age (yrs)_fighter_2', 'fight_result_fighter_2',
         'kd_fighter_2', 'sig_strikes_landed_fighter_2',
         'sig_strikes_attempted_fighter_2', 'sig_strikes_pct_fighter_2',
@@ -499,7 +506,7 @@ def run_etl_pipeline(
         'sub_att_fighter_2', 'rev_fighter_2', 'ctrl_in_secs_fighter_2',
         'fighter_url_fighter_2', 'date_of_birth_fighter_2',
         'Height (m)_fighter_2', 'Weight (lbs)_fighter_2', 'Reach (in)_fighter_2',
-        'STANCE_fighter_2'
+        'Stance_fighter_2'
     ]
     # Columns not named in ordered_columns are APPENDED, not dropped. By
     # this point in the pipeline every column present was deliberately
