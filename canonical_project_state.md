@@ -1,6 +1,6 @@
 # UDE Points — Canonical Project State
 
-**Baseline date: 21 August 2026 — v2.6 locked as production.**
+**Baseline date: 21 August 2026 — v2.6 locked as production.** Utils/pipeline layer extended 26 August 2026 (§4, §7) — no scoring changes, v2.6's lock still holds.
 
 This document is intended to be the **authoritative compact context** for continuing the UDE Points project. It reflects the current state — architecture, decisions in force, and known tradeoffs — not a history of how it was reached. For the "how we got here," see `project_history.md`.
 
@@ -117,6 +117,27 @@ fighter-level career trajectory
         ↓
 ranking / historical analysis / visualization
 ```
+
+### 4a. Rankings
+`rank_fighters_by_shrunk_ude_rate` is the locked GOAT ranking (§2a). `rank_fighters_by_shrunk_ude_rate_by_weight_class(df, weight_class=None, start_year=None, end_year=None, prior_strength=10.0, min_fights=None)` is a thin wrapper — `filter_by_weight_class`/`filter_by_year` pre-filter, then the unchanged ranking function runs on the filtered population, so the shrinkage target (`population_mean_rate`) is the *division's own* mean rate, not the promotion-wide one. `filter_by_weight_class` deliberately does not also require both fighters in a fight to individually clear a fight-count floor in that division — an earlier version of this idea did, and silently undercounted a fighter's real fight total by dropping fights against one-off opponents; the floor belongs to the ranking function's own `min_fights`, applied post-scoring on the fighter actually being ranked.
+
+### 4b. Fighter status
+`create_fighter_status_dataset(df, as_of=None)` — active/inactive per fighter (fought within 730 days of `as_of`). `as_of` defaults to `datetime.now()`, making the result non-deterministic across runs by design (unlike everything else in this project, "is this fighter still active" is genuinely an as-of-today question) — pass `as_of` explicitly for a reproducible cutoff.
+
+### 4c. Finishing rate, power, and durability-adjusted power — three deliberately separate metrics
+None is blended into the others; each answers a different question:
+- **`calculate_overall_potency`** ("who finishes fights") — win-conditioned: `finishes / wins` per fighter/weight-class (striking and grappling computed separately, combined by geometric mean), shrunk toward each division's own baseline. Excludes injury-cause stoppages from the finish count (checks `details` for "injury").
+- **`calculate_striking_power`** ("who hits hardest") — NOT win-conditioned: `kd / head_strikes_landed` per fighter/weight-class, same shrinkage machinery and injury filter. A knockdown the opponent survives counts exactly as much as one that ends the fight.
+- **`calculate_durability_adjusted_power`** — `calculate_striking_power`, reweighted per-fight by `add_opponent_durability_multiplier`: a bounded `[0.5, 2.0]` multiplier from the OPPONENT's own pre-fight standing-KO/TKO-loss rate, shrunk toward *that fight's own weight class* baseline (not one dataset-wide number — this rate spans 8.4x across divisions, HW to WSW). Neither `calculate_striking_power` nor `calculate_overall_potency` incorporates this adjustment; only `calculate_durability_adjusted_power` does.
+- Shared helper: `_shrink_rate(count, total, prior_strength, prior_rate)` — same shape as `ude_points_algorithm.shrunk_win_rate`, generalized to an arbitrary count/total pair. `RATE_SHRINKAGE_PRIOR_STRENGTH=5.0` (potency & power) and `DURABILITY_SHRINKAGE_PRIOR_STRENGTH=15.0` are both sensitivity-checked: potency's top-10 rankings hold 7–10/10 stable across a 1→30 sweep, power's hold 9–10/10 (sturdier because its floor, `min_head_strikes_landed`, gates directly on the ratio's own denominator rather than a looser fight-count proxy).
+- **Known limitation, not a bug:** `add_opponent_durability_multiplier`'s bound binds for ~63% of fighter-fight observations even with correct division-scoping — a structural consequence of shrinking a right-skewed, rare-event rate toward its mean (a majority of any population legitimately sits below the mean for a rare event), not a miscalibration. Left as-is; revisit only if a specific downstream use needs finer discrimination among highly-durable opponents specifically (see `project_history.md` for the fuller mean-vs-median tradeoff discussion).
+
+### 4d. Rematch history
+`process_rematch_data(df, exclude_no_contests=False)` (+ `find_same_winner_rematches`) — every fighter-pair rematch, whether each meeting was immediate (no intervening fight for either side since their last meeting), and the winner. `assign_winner` returns distinct `'draw'`/`'no_contest'` sentinels rather than a collapsed `None`, so two draws between the same pair can't spuriously register as a repeat win. `filter_invalid_rematches` reuses `ude_points_algorithm.is_no_score_fight` (checks both `fight_result == 'NC'` and `method in {'DQ', 'Overturned'}`) instead of a narrower method-string-only check.
+
+### 4e. Opponent-similarity matching
+`find_most_similar_past_opponents(df, fighter_name, future_opponent_name, exclude_future_opponent=True)` — for a fighter's upcoming opponent, ranks their own past opponents by similarity to that opponent. **Physical** (age, height, reach) and **style** (`dynamic_*` striking/TD accuracy & defense) similarity are reported separately, not blended into one score — a fighter can be a close physical match while fighting a completely different style. Every compared column is min-max scaled before differencing (unscaled differences let whichever column has the largest raw numeric range dominate the ranking). `total_difference` is the mean of the *available* `|diff|` values per row, not a sum with missing columns filled to 0 — filling-to-0 would let a past opponent with zero real comparison data score a false "perfect match." `stance_match` (`'same'`/`'different'`/`'unknown'`) is attached as a flag alongside the score, not folded into the numeric distance, since stance is categorical, not subtractable. `exclude_future_opponent=True` (default) drops the future opponent's own past meeting(s) with the fighter from their own comparison set — without it, a fighter who's already fought their upcoming opponent trivially ranks that real fight as the "most similar" match to itself.
+
 ---
 
 ## 5. Planned Next Steps (v3 candidates)
@@ -147,20 +168,26 @@ Net: buildable, and the data supports a first version — but it's a v3-scale pr
 
 ## 7. Current Source Files
 
+**Folder layout note (26 Aug 2026, outside pipeline tracking):** notebooks and several older dataset snapshots (`v2_6.csv`, `v2_6_with_phase_profiles.csv`, plus the raw ETL inputs used for the stance regeneration below) were moved into an `ipynb and old datasets/` subfolder. `fights_up_to_islam_garry_ready_for_features.csv` and the current production file stayed in the main folder.
+
 **Pipeline order:** `dataset_processing_pipeline.py` (raw scrape → 1-row-per-fight) → `ude_points_feature_engineering_pipeline.py` (→ PDI/chronological features) → `ude_points_algorithm.py` (→ UDE points) → `ude_points_utils.py` (→ rankings/career views).
 
-* ```text dataset_processing_pipeline.py ``` — ETL: merges raw scraped fight/event/fighter-bio data into one row per fight (`run_etl_pipeline`). Drops and reports (does not silently discard) any row where the `event_date` join finds no matching event — `drop_rows_with_null_event_date`, called right after column standardization. `ude_points_feature_engineering_pipeline.engineer_all_features` calls the same function again defensively at its own entry point, in case its input didn't come through this ETL step.
+* ```text dataset_processing_pipeline.py ``` — ETL: merges raw scraped fight/event/fighter-bio data into one row per fight (`run_etl_pipeline`). Drops and reports (does not silently discard) any row where `event_date` is null — `drop_rows_with_null_event_date`, called twice inside `run_etl_pipeline`: right after column standardization (catches a failed event-date join on the freshly-scraped data) and again right after the optional `current_dataset` merge (catches null/unparseable dates already sitting in the historical data being appended to — a fresh scrape's own check can't see those, since they enter the pipeline later). `ude_points_feature_engineering_pipeline.engineer_all_features` calls the same function again defensively at its own entry point, in case its input didn't come through this ETL step at all. `bio_cols` (step 6) now also carries `STANCE` through from the raw fighter-bio scrape into the merged fight dataset. The final column-ordering step (step 12) *appends* any column not named in its `ordered_columns` list instead of dropping it — a strict whitelist there previously discarded `STANCE` silently even after the bio merge succeeded, and (once switched to append) immediately surfaced a second, unrelated pre-existing issue: `convert_to_one_fight_one_row`'s `.nth(0)`/`.nth(1)` calls didn't drop their pre-groupby row index, so a bare `.reset_index()` was creating a meaningless `index_fighter_1`/`_fighter_2` column that the old whitelist had been silently swallowing too. Both are fixed (`ordered_columns` appends now; `.reset_index(drop=True)` on both `.nth()` calls).
 
 * ```text fights_up_to_islam_garry_ready_for_features.csv ``` — Output of `run_etl_pipeline`; input to `engineer_all_features`. 75 raw columns. Verified: running the full pipeline (`engineer_all_features` → `calculate_ude_points_with_ablation` → `add_ude_points_difference_columns`) on this file reproduces `v2_6.csv` bit-for-bit (same 8,564 fight URLs, zero difference in any UDE point) — confirms the pipeline is fully reproducible from genuinely raw data, not just self-consistent under incremental patching.
 
-* ```text ude_points_algorithm.py ``` — Authoritative UDE scoring implementation.
+* ```text ude_points_algorithm.py ``` — Authoritative UDE scoring implementation. Unchanged since v2.6's lock.
 
-* ```text ude_points_feature_engineering_pipeline.py ``` — Generates chronological state and PDI fight-performance features.
+* ```text ude_points_feature_engineering_pipeline.py ``` — Generates chronological state and PDI fight-performance features. Unchanged since v2.6's lock.
 
-* ```text ude_points_utils.py ``` — Handles peak, career, shrunk-rate rankings, and career dataset conversions.
+* ```text ude_points_utils.py ``` — Peak/career/shrunk-rate rankings and career dataset conversions, plus (added 26 Aug 2026, see §4a–4e) division/era-scoped ranking, fighter active/inactive status, finishing-rate and power metrics (with a durability-adjusted variant), rematch history, and opponent-similarity matching. Now imports `is_no_score_fight` from `ude_points_algorithm.py`.
 
-* ```text latest_fights_up_to_islam_garry_with_ude_points_calculated_v2_6 ``` — **Current** main historical fight dataset with calculated UDE points. 8,564 fights × 256 columns. Reflects the full scoring mechanics in §2, rebuilt end-to-end from raw columns per §3's "Column hygiene" note — not an incrementally patched file.
+* ```text latest_fights_up_to_islam_garry_with_ude_points_calculated_v2_6_with_stance.csv ``` — **Current production file.** 8,564 fights × 258 columns. Verified bit-identical to `v2_6.csv` (below) on all 255 shared, non-`STANCE` columns — this is an additive enrichment (2 new `STANCE_fighter_1`/`_fighter_2` columns, ~98% coverage after backfilling from the fighter-bio source by `fighter_url`), not a scoring change; v2.6's lock still applies. Same naming pattern as `_with_phase_profiles` below — an additive variant, not a version bump.
 
-* ```text latest_fights_up_to_islam_garry_with_ude_points_calculated_v2_5 ``` — Superseded by v2_6. Retained, not deleted, as a pre-fix historical snapshot.
+* ```text latest_fights_up_to_islam_garry_with_ude_points_calculated_v2_6 ``` — 8,564 fights × 256 columns, no `STANCE`. Reflects the full scoring mechanics in §2, rebuilt end-to-end from raw columns per §3's "Column hygiene" note. Superseded by `_with_stance` above for anything needing physical/stance data; otherwise equivalent. Moved to `ipynb and old datasets/` in the 26 Aug reorg.
+
+* ```text latest_fights_up_to_islam_garry_with_ude_points_calculated_v2_6_with_phase_profiles ``` — 8,564 fights × ~400 columns, adds 12-phase skill percentiles (full-history + 3-year era-windowed). Does not have `STANCE`; cross-reference by `fight_url` against `_with_stance` if a use needs both. Moved to `ipynb and old datasets/`.
+
+* ```text latest_fights_up_to_islam_garry_with_ude_points_calculated_v2_5 ``` — Superseded by v2_6. Retained, not deleted, as a pre-fix historical snapshot. Still in the main folder (not part of the 26 Aug reorg).
 
 * ```text project_history.md ``` — Chronological record of how the current state was reached; not required reading to continue the project.
