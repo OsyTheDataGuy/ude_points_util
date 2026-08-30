@@ -1674,7 +1674,10 @@ def generate_fighter_profile(df, fighter_name):
     fighter-bio scrape has a STANCE field, but
     dataset_processing_pipeline.run_etl_pipeline's bio_cols list didn't
     carry it into the merged fight dataset. Both gaps are closed now --
-    'STANCE' was added to bio_cols and the dataset regenerated (see
+    process_fighter_bio exposes the raw STANCE field as 'Stance' (Title
+    Case, matching 'Height (m)'/'Weight (lbs)'/'Reach (in)''s naming
+    rather than the all-caps raw scrape column), it was added to bio_cols,
+    and the dataset regenerated (see
     latest_fights_up_to_islam_garry_with_ude_points_calculated_v2_6_with_stance.csv,
     validated bit-identical to v2_6.csv on every other column).
 
@@ -1688,8 +1691,8 @@ def generate_fighter_profile(df, fighter_name):
     INTO their most recent fight, not including how that fight itself
     went -- dynamic_* columns are pre-fight snapshots by convention
     throughout this project (see mma_content_strategy.md's data-sourcing
-    rules). df without a STANCE column (e.g. plain v2_6.csv) still works;
-    the profile's 'STANCE' value is just None in that case.
+    rules). df without a Stance column (e.g. plain v2_6.csv) still works;
+    the profile's 'Stance' value is just None in that case.
     """
     career = create_fighter_career_dataset(df, fighter_name)
     if career.empty:
@@ -1697,7 +1700,7 @@ def generate_fighter_profile(df, fighter_name):
 
     latest = career.sort_values(by='event_date', ascending=False).iloc[0]
     profile = {'fighter': fighter_name, 'fighter_url': latest['fighter_url'],
-               'STANCE': latest.get('STANCE')}
+               'Stance': latest.get('Stance')}
     for col in PHYSICAL_SIMILARITY_COLUMNS + STYLE_SIMILARITY_COLUMNS:
         profile[col] = latest.get(col)
 
@@ -1706,7 +1709,7 @@ def generate_fighter_profile(df, fighter_name):
 
 def _stance_match_label(future_stance, past_stance):
     """'same'/'different'/'unknown' -- 'unknown' (not a false 'different')
-    when either side's stance is missing, since STANCE coverage in the
+    when either side's stance is missing, since Stance coverage in the
     current dataset is ~98%, not 100%, and a missing value is not evidence
     of a mismatch."""
     if pd.isna(future_stance) or pd.isna(past_stance):
@@ -1739,13 +1742,13 @@ def calculate_similarity_differences(future_profile, career_dataset, columns_to_
     notebook ran. This function takes columns_to_compare explicitly
     instead of an auto-detected default, so that mismatch can't recur.
 
-    If both future_profile and career_dataset carry stance data (STANCE /
-    opponent_STANCE), a stance_match column ('same'/'different'/'unknown')
+    If both future_profile and career_dataset carry stance data (Stance /
+    opponent_Stance), a stance_match column ('same'/'different'/'unknown')
     is attached too -- informational only, not part of total_difference or
     the sort. Stance is categorical, not a subtractable numeric quantity,
     so it's surfaced as a flag next to the score rather than blended into
     it (see generate_fighter_profile). Missing on a df built before the
-    STANCE pipeline addition (e.g. plain v2_6.csv) -- the column is simply
+    Stance pipeline addition (e.g. plain v2_6.csv) -- the column is simply
     omitted in that case, not an error.
     """
     if future_profile.shape[0] != 1:
@@ -1753,9 +1756,9 @@ def calculate_similarity_differences(future_profile, career_dataset, columns_to_
 
     result = career_dataset[['opponent', 'opponent_fighter_url']].copy()
 
-    if 'STANCE' in future_profile.columns and 'opponent_STANCE' in career_dataset.columns:
-        future_stance = future_profile['STANCE'].values[0]
-        result['stance_match'] = career_dataset['opponent_STANCE'].apply(
+    if 'Stance' in future_profile.columns and 'opponent_Stance' in career_dataset.columns:
+        future_stance = future_profile['Stance'].values[0]
+        result['stance_match'] = career_dataset['opponent_Stance'].apply(
             lambda past_stance: _stance_match_label(future_stance, past_stance)
         )
 
