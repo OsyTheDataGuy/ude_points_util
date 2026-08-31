@@ -1,6 +1,6 @@
 # UDE Points — Canonical Project State
 
-**Baseline date: 21 August 2026 — v2.6 locked as production.** Utils/pipeline layer extended 26 August 2026 (§4, §7) — no scoring changes, v2.6's lock still holds.
+**Baseline date: 21 August 2026 — v2.6 locked as production.** The scoring engine (`ude_points_algorithm.py`, `ude_points_feature_engineering_pipeline.py`) is unchanged since this lock; `ude_points_utils.py` and `dataset_processing_pipeline.py` have grown since (§4, §7) without touching scoring.
 
 This document is intended to be the **authoritative compact context** for continuing the UDE Points project. It reflects the current state — architecture, decisions in force, and known tradeoffs — not a history of how it was reached. For the "how we got here," see `project_history.md`.
 
@@ -50,38 +50,38 @@ Per fighter-side, per fight, in order: `raw_base_points` (±3 W/L) → `champion
 
 ## 2a. Locked GOAT Ranking
 
-`rank_fighters_by_shrunk_ude_rate(df, prior_strength=10.0, min_fights=10)` on `latest_fights_up_to_islam_garry_with_ude_points_calculated_v2_6.csv`. `min_fights=10` excludes small-sample careers that Bayesian shrinkage alone doesn't stabilize (`population_mean_rate` is still computed over the full unfiltered population, so the floor doesn't bias the shrinkage target for anyone). Stability-checked: 18–19/20 top-20 membership overlap when `prior_strength` is swept 5→20 with the floor applied.
+`rank_fighters_by_shrunk_ude_rate(df, prior_strength=10.0, min_fights=10)` on `current_df.csv` (§7) — reproduced directly from that live file, not a fixed historical snapshot; re-run this against `current_df.csv` after any refresh to regenerate the table below, rather than trusting it to stay current on its own. `min_fights=10` excludes small-sample careers that Bayesian shrinkage alone doesn't stabilize (`population_mean_rate` is still computed over the full unfiltered population, so the floor doesn't bias the shrinkage target for anyone). Stability-checked: 18–19/20 top-20 membership overlap when `prior_strength` is swept 5→20 with the floor applied. See §4a's note below the table for why this rate/shrinkage approach is used at all, over ranking on raw cumulative career points.
 
 | Rank | Fighter | Record | Fights | Career Gain | Shrunk Rate |
 |---|---|---|---|---|---|
-| 1 | Georges St-Pierre | 20-2-0 | 22 | 154.8 | 4.428 |
-| 2 | Jon Jones | 22-1-0 | 24 | 158.4 | 4.275 |
-| 3 | Islam Makhachev | 18-1-0 | 19 | 110.9 | 3.373 |
-| 4 | Demetrious Johnson | 15-2-1 | 18 | 89.0 | 2.712 |
-| 5 | Amanda Nunes | 16-2-0 | 18 | 82.9 | 2.495 |
-| 6 | Valentina Shevchenko | 15-3-1 | 19 | 81.2 | 2.350 |
-| 7 | Khabib Nurmagomedov | 13-0-0 | 13 | 67.0 | 2.343 |
-| 8 | Alexander Volkanovski | 15-3-0 | 18 | 76.0 | 2.247 |
-| 9 | Justin Gaethje | 11-5-0 | 16 | 57.1 | 1.693 |
-| 10 | Merab Dvalishvili | 14-3-0 | 17 | 56.4 | 1.605 |
-| 11 | Dricus Du Plessis | 10-1-0 | 11 | 44.5 | 1.494 |
-| 12 | Daniel Cormier | 11-3-0 | 15 | 50.0 | 1.476 |
-| 13 | Ilia Topuria | 9-1-0 | 10 | 42.5 | 1.473 |
-| 14 | Francis Ngannou | 12-2-0 | 14 | 46.4 | 1.390 |
-| 15 | Alex Pereira | 10-3-0 | 13 | 44.0 | 1.345 |
-| 16 | Alexandre Pantoja | 14-4-0 | 18 | 49.5 | 1.300 |
-| 17 | Movsar Evloev | 10-0-0 | 10 | 38.9 | 1.290 |
-| 18 | Aljamain Sterling | 18-5-0 | 23 | 54.0 | 1.239 |
-| 19 | Benson Henderson | 11-3-0 | 14 | 42.7 | 1.232 |
-| 20 | Petr Yan | 12-4-0 | 16 | 44.6 | 1.214 |
+| 1 | Georges St-Pierre | 20-2-0 | 22 | 154.8 | 4.430 |
+| 2 | Jon Jones | 22-1-0 | 24 | 158.4 | 4.276 |
+| 3 | Islam Makhachev | 18-1-0 | 19 | 110.9 | 3.375 |
+| 4 | Demetrious Johnson | 15-2-1 | 18 | 89.0 | 2.714 |
+| 5 | Amanda Nunes | 16-2-0 | 18 | 82.9 | 2.497 |
+| 6 | Valentina Shevchenko | 15-3-1 | 19 | 81.2 | 2.351 |
+| 7 | Khabib Nurmagomedov | 13-0-0 | 13 | 67.0 | 2.345 |
+| 8 | Alexander Volkanovski | 15-3-0 | 18 | 76.0 | 2.249 |
+| 9 | Justin Gaethje | 11-5-0 | 16 | 57.1 | 1.695 |
+| 10 | Merab Dvalishvili | 14-3-0 | 17 | 56.4 | 1.607 |
+| 11 | Dricus Du Plessis | 10-1-0 | 11 | 44.5 | 1.497 |
+| 12 | Daniel Cormier | 11-3-0 | 15 | 50.0 | 1.478 |
+| 13 | Ilia Topuria | 9-1-0 | 10 | 42.5 | 1.476 |
+| 14 | Francis Ngannou | 12-2-0 | 14 | 46.4 | 1.392 |
+| 15 | Alex Pereira | 10-3-0 | 13 | 44.0 | 1.347 |
+| 16 | Alexandre Pantoja | 14-4-0 | 18 | 49.5 | 1.302 |
+| 17 | Movsar Evloev | 10-0-0 | 10 | 38.9 | 1.293 |
+| 18 | Aljamain Sterling | 18-5-0 | 23 | 54.0 | 1.241 |
+| 19 | Benson Henderson | 11-3-0 | 14 | 42.7 | 1.235 |
+| 20 | Petr Yan | 12-4-0 | 16 | 44.6 | 1.216 |
 
-619 fighters clear the `n_fights >= 10` floor. Topuria, Evloev, Dricus Du Plessis, and Alex Pereira sit closest to it (10–13 fights).
+623 fighters clear the `n_fights >= 10` floor (up from 619 at the v2.6-era snapshot, as new fights push more careers past the threshold). Topuria, Evloev, Dricus Du Plessis, and Alex Pereira sit closest to it (10–13 fights). Top-20 membership and order are unchanged from the prior snapshot — the small shifts in Shrunk Rate (third decimal place) come entirely from `population_mean_rate` moving slightly as new fights enter the full population; none of these 20 fighters personally had a new fight added.
 
 ---
 
 ## 3. Core Data & Architecture
 
-The principal dataset contains **8,564 UFC fights** through the Islam Makhachev vs. Ian Machado Garry timeframe.
+The principal dataset (`current_df.csv`) contains **8,590 UFC fights** as of the last automated refresh. It is kept current on a weekly cycle by the automated pipeline (§8), not a static snapshot — the fight count grows each time a refresh PR is merged.
 
 ### Fundamental Dataframe Structure
 The fight dataframe utilizes a standardized two-sided convention:
@@ -119,7 +119,9 @@ ranking / historical analysis / visualization
 ```
 
 ### 4a. Rankings
-`rank_fighters_by_shrunk_ude_rate` is the locked GOAT ranking (§2a). `rank_fighters_by_shrunk_ude_rate_by_weight_class(df, weight_class=None, start_year=None, end_year=None, prior_strength=10.0, min_fights=None)` is a thin wrapper — `filter_by_weight_class`/`filter_by_year` pre-filter, then the unchanged ranking function runs on the filtered population, so the shrinkage target (`population_mean_rate`) is the *division's own* mean rate, not the promotion-wide one. `filter_by_weight_class` deliberately does not also require both fighters in a fight to individually clear a fight-count floor in that division — an earlier version of this idea did, and silently undercounted a fighter's real fight total by dropping fights against one-off opponents; the floor belongs to the ranking function's own `min_fights`, applied post-scoring on the fighter actually being ranked.
+`rank_fighters_by_shrunk_ude_rate` is the locked GOAT ranking (§2a). `rank_fighters_by_shrunk_ude_rate_by_weight_class(df, weight_class=None, start_year=None, end_year=None, prior_strength=10.0, min_fights=None)` is a thin wrapper — `filter_by_weight_class`/`filter_by_year` pre-filter, then the unchanged ranking function runs on the filtered population, so the shrinkage target (`population_mean_rate`) is the *division's own* mean rate, not the promotion-wide one. `filter_by_weight_class` deliberately does not also require both fighters in a fight to individually clear a fight-count floor in that division: doing so would drop fights against one-off opponents entirely, undercounting a fighter's real fight total in that division. The fight-count floor lives solely in the ranking function's own `min_fights`, applied post-scoring on the fighter actually being ranked.
+
+**Why shrunk per-fight rate, not raw cumulative career points:** `career_point_gain` (cumulative UDE points earned) rewards volume as much as quality — on `current_df.csv`, Dustin Poirier (32 fights) ranks #31 by raw cumulative total but only #56 by shrunk rate, because a below-average per-fight rate (1.06, vs. GSP's 7.04) compounds into a large total purely by fighting more times. Dividing by `n_fights` (`raw_rate`) fixes that but creates the opposite problem at the other end: with n=1, Frank Shamrock and Bas Rutten post `raw_rate` ≈ 5.0–5.1 (higher than GSP's career rate) off a single fight each — a sample far too small to trust as a "true" rate. Bayesian shrinkage resolves both at once: `shrunk_rate` is a weighted average of a fighter's own `raw_rate` and the full population's `population_mean_rate` (currently ≈ −1.30, dragged negative because 39.5% of all 2,555 scored fighters have 3 or fewer fights and average −2.43 — most short UFC careers end on a loss, not a win), weighted by `n_fights` vs. `prior_strength` (10.0, in equivalent-fights units). A 1-fight career gets pulled almost entirely to the population mean (Shamrock: 5.10 → −0.72); a 22-fight career like GSP's barely moves (7.04 → 4.43) because real evidence outweighs the prior 2-to-1. Shrinkage alone still isn't a complete fix at the margin, though — Shavkat Rakhmonov's 7-fight, `shrunk_rate`-only ranking (unfiltered) would place him #37 overall, ahead of many 15+ fight veterans — which is exactly why `min_fights=10` exists as a hard floor on top of the shrinkage, rather than relying on the prior alone to argue every small sample back into line.
 
 ### 4b. Fighter status
 `create_fighter_status_dataset(df, as_of=None)` — active/inactive per fighter (fought within 730 days of `as_of`). `as_of` defaults to `datetime.now()`, making the result non-deterministic across runs by design (unlike everything else in this project, "is this fighter still active" is genuinely an as-of-today question) — pass `as_of` explicitly for a reproducible cutoff.
@@ -157,7 +159,7 @@ None is blended into the others; each answers a different question:
 What's available: fight stats (PDI, significant strikes, etc.) have 0% missing data back to 1999, so there's no raw-coverage blocker. 34.4% of all fighters (874 of 2,544) have fought in 2+ weight classes — enough cross-division bridges to plausibly identify relative division/era strength via a paired-comparison model (Bradley-Terry-style), the same way this project already fits age and method effects, rather than a circular "average the division's own UDE ratings" shortcut (which would just feed the ranking back into itself).
 
 What's genuinely hard:
-- **Identification is real modeling work.** A new calibration function is needed — analogous to `calibrate_age_effects` — that estimates weight-class × era strength offsets from the bridge-fighter network, with the same strict-temporal, no-future-leakage discipline already enforced elsewhere, and an explicit NaN-safe fallback for under-connected cells (the exact class of bug found and fixed in `_age_multiplier` this session must be designed against from the start here).
+- **Identification is real modeling work.** A new calibration function is needed — analogous to `calibrate_age_effects` — that estimates weight-class × era strength offsets from the bridge-fighter network, with the same strict-temporal, no-future-leakage discipline already enforced elsewhere, and an explicit NaN-safe fallback for under-connected cells (the exact class of bug already found and fixed once in `_age_multiplier`, see `project_history.md` #11, must be designed against from the start here).
 - **Some cells have no data by construction, not by gap.** Featherweight and bantamweight didn't exist in the UFC before ~2011 (0 unique fighters in 2001–2003 in this dataset, 129–140 by 2022–2024) — there's no "true" era-strength value to estimate for a division that didn't exist yet, only a defined "not applicable" state.
 - **Measurement validity, not just volume.** Rules, judging criteria, and round/format standards changed materially over 1999–2026; a "dominant" PDI performance under one era's judging isn't necessarily comparable to another's, and no amount of additional fight-count data fixes that — it's a property of the sport's history, not an engineering gap.
 - **No ground truth.** There's no objective answer to "was 2003 heavyweight weaker than 2024 lightweight," so any model needs face-validity checks against combat-sports historical consensus before being trusted, not just a clean fit statistic.
@@ -168,26 +170,39 @@ Net: buildable, and the data supports a first version — but it's a v3-scale pr
 
 ## 7. Current Source Files
 
-**Folder layout note (26 Aug 2026, outside pipeline tracking):** notebooks and several older dataset snapshots (`v2_6.csv`, `v2_6_with_phase_profiles.csv`, plus the raw ETL inputs used for the stance regeneration below) were moved into an `ipynb and old datasets/` subfolder. `fights_up_to_islam_garry_ready_for_features.csv` and the current production file stayed in the main folder.
+**What's usually shared alongside this document:** `dataset_processing_pipeline.py`, `ude_points_feature_engineering_pipeline.py`, `ude_points_algorithm.py`, and `current_df.csv`. These four are documented in full below. Everything else exists only in the project's GitHub repo (`OsyTheDataGuy/ude_points_util`) and is listed in one line each at the end of this section — detailed elsewhere in this document (§4, §8), not repeated here.
 
-**Pipeline order:** `dataset_processing_pipeline.py` (raw scrape → 1-row-per-fight) → `ude_points_feature_engineering_pipeline.py` (→ PDI/chronological features) → `ude_points_algorithm.py` (→ UDE points) → `ude_points_utils.py` (→ rankings/career views).
+**Folder layout:** the main folder holds the active pipeline files (below) plus `current_df.csv` and `fighters_df.csv`, both live files kept current by the automated pipeline (§8). No other dataset snapshots or notebooks remain locally — earlier superseded snapshots (`v2_6.csv`, `v2_6_with_phase_profiles.csv`, the raw ETL-stage `..._ready_for_features.csv`, the old `v2_5.csv`) have been deleted, not archived; `project_history.md` is the record of what they contained.
 
-* ```text dataset_processing_pipeline.py ``` — ETL: merges raw scraped fight/event/fighter-bio data into one row per fight (`run_etl_pipeline`). Drops and reports (does not silently discard) any row where `event_date` is null — `drop_rows_with_null_event_date`, called twice inside `run_etl_pipeline`: right after column standardization (catches a failed event-date join on the freshly-scraped data) and again right after the optional `current_dataset` merge (catches null/unparseable dates already sitting in the historical data being appended to — a fresh scrape's own check can't see those, since they enter the pipeline later). `ude_points_feature_engineering_pipeline.engineer_all_features` calls the same function again defensively at its own entry point, in case its input didn't come through this ETL step at all. `bio_cols` (step 6) now also carries `STANCE` through from the raw fighter-bio scrape into the merged fight dataset. The final column-ordering step (step 12) *appends* any column not named in its `ordered_columns` list instead of dropping it — a strict whitelist there previously discarded `STANCE` silently even after the bio merge succeeded, and (once switched to append) immediately surfaced a second, unrelated pre-existing issue: `convert_to_one_fight_one_row`'s `.nth(0)`/`.nth(1)` calls didn't drop their pre-groupby row index, so a bare `.reset_index()` was creating a meaningless `index_fighter_1`/`_fighter_2` column that the old whitelist had been silently swallowing too. Both are fixed (`ordered_columns` appends now; `.reset_index(drop=True)` on both `.nth()` calls).
+**Pipeline order:** `fighter_scrape_new.py` + `ude_scrape_new.py` (acquisition, incremental) → `dataset_processing_pipeline.py` (raw scrape → 1-row-per-fight) → `ude_points_feature_engineering_pipeline.py` (→ PDI/chronological features) → `ude_points_algorithm.py` (→ UDE points) → `ude_points_utils.py` (→ rankings/career views). `run_refresh.py` orchestrates the ETL-through-scoring half of this chain as one call (§8); the two scrapers run as separate steps before it.
 
-* ```text fights_up_to_islam_garry_ready_for_features.csv ``` — Output of `run_etl_pipeline`; input to `engineer_all_features`. 75 raw columns. Verified: running the full pipeline (`engineer_all_features` → `calculate_ude_points_with_ablation` → `add_ude_points_difference_columns`) on this file reproduces `v2_6.csv` bit-for-bit (same 8,564 fight URLs, zero difference in any UDE point) — confirms the pipeline is fully reproducible from genuinely raw data, not just self-consistent under incremental patching.
+* ```text dataset_processing_pipeline.py ``` — ETL: merges raw scraped fight/event/fighter-bio data into one row per fight (`run_etl_pipeline`). Drops and reports (does not silently discard) any row where `event_date` is null — `drop_rows_with_null_event_date`, called twice inside `run_etl_pipeline`: right after column standardization (catches a failed event-date join on the freshly-scraped data) and again right after the optional `current_dataset` merge (catches null/unparseable dates already sitting in the historical data being appended to — a fresh scrape's own check can't see those, since they enter the pipeline later). `ude_points_feature_engineering_pipeline.engineer_all_features` calls the same function again defensively at its own entry point, in case its input didn't come through this ETL step at all. `bio_cols` (step 6) carries `Height (m)`/`Weight (lbs)`/`Reach (in)`/`Stance` through from the raw fighter-bio scrape into the merged fight dataset. The final column-ordering step (step 12) appends any column not named in its `ordered_columns` list rather than dropping it, since by that point every column present was already deliberately constructed by an earlier step — the list's job is establishing a readable order, not deciding what belongs in the output. `convert_to_one_fight_one_row`'s `.nth(0)`/`.nth(1)` calls use `reset_index(drop=True)`, so no stray row-index column survives the pivot to one-row-per-fight. `validate_transformed_data` (called inside `run_etl_pipeline`, on the freshly-scraped batch before `current_dataset` is merged in) checks primary-key uniqueness, landed≤attempted, age/control-time bounds, join-leakage nulls, and — when `current_dataset` is passed in — that none of the batch's `fight_url`s already exist there. `validate_dataset_regeneration(old_df, new_df, key_col='fight_url', columns_expected_to_change=None)` is a separate function for a different pipeline stage: it diffs a prior fully-processed/scored dataset against a freshly regenerated one, raising on any lost key or any changed column not explicitly listed as expected to change.
+
+* ```text ude_points_feature_engineering_pipeline.py ``` — Generates chronological state and PDI fight-performance features. Scoring inputs (`pdi_margin` and everything derived from it) are unchanged since v2.6's lock. The file itself is not: `calculate_phase_magnitude_and_pdi` was edited post-lock to fix `decisive_wins`/`close_wins`/`ties` misclassification (project_history.md #33) by rounding a separate copy of the phase magnitudes before classification bucketing — verified to leave `pdi_margin` and every scored output bit-identical.
 
 * ```text ude_points_algorithm.py ``` — Authoritative UDE scoring implementation. Unchanged since v2.6's lock.
 
-* ```text ude_points_feature_engineering_pipeline.py ``` — Generates chronological state and PDI fight-performance features. Unchanged since v2.6's lock.
+* ```text current_df.csv ``` — **Current production file**, and the file the automated weekly pipeline (§8) reads and overwrites in place. 8,590 fights × 258 columns as of the last refresh; includes `Stance_fighter_1`/`Stance_fighter_2` (~98% coverage, backfilled from `fighters_df.csv` by `fighter_url`) — an additive enrichment, not a scoring change; v2.6's lock still applies. There is only ever one file under this name: each merged refresh PR replaces its content with that cycle's newly scored output (§8) — it is not a fixed snapshot and its row count grows over time.
 
-* ```text ude_points_utils.py ``` — Peak/career/shrunk-rate rankings and career dataset conversions, plus (added 26 Aug 2026, see §4a–4e) division/era-scoped ranking, fighter active/inactive status, finishing-rate and power metrics (with a durability-adjusted variant), rematch history, and opponent-similarity matching. Now imports `is_no_score_fight` from `ude_points_algorithm.py`.
+**Also in the GitHub repo, not routinely shared here:**
+* `ude_points_utils.py` — rankings/career/similarity utilities (§4a–4e); imports `is_no_score_fight` from `ude_points_algorithm.py`.
+* `fighters_df.csv` — fighter bio source (Height/Weight/Reach/Stance/DOB) keyed by `URL`, 4,614 fighters as of the last refresh, kept current by the automated pipeline; carries a `bio_scrape_attempts` retry-cap column (§8).
+* `fighter_scrape_new.py`, `ude_scrape_new.py`, `run_refresh.py` — the automated acquisition/refresh scripts (§8).
+* `requirements.txt`, `.github/workflows/refresh_dataset.yml` — CI dependency list and the workflow definition (§8).
+* `project_history.md` — chronological record of how the current state was reached; not required reading to continue the project.
 
-* ```text latest_fights_up_to_islam_garry_with_ude_points_calculated_v2_6_with_stance.csv ``` — **Current production file.** 8,564 fights × 258 columns. Verified bit-identical to `v2_6.csv` (below) on all 255 shared, non-`STANCE` columns — this is an additive enrichment (2 new `STANCE_fighter_1`/`_fighter_2` columns, ~98% coverage after backfilling from the fighter-bio source by `fighter_url`), not a scoring change; v2.6's lock still applies. Same naming pattern as `_with_phase_profiles` below — an additive variant, not a version bump.
+---
 
-* ```text latest_fights_up_to_islam_garry_with_ude_points_calculated_v2_6 ``` — 8,564 fights × 256 columns, no `STANCE`. Reflects the full scoring mechanics in §2, rebuilt end-to-end from raw columns per §3's "Column hygiene" note. Superseded by `_with_stance` above for anything needing physical/stance data; otherwise equivalent. Moved to `ipynb and old datasets/` in the 26 Aug reorg.
+## 8. Automated Production Pipeline
 
-* ```text latest_fights_up_to_islam_garry_with_ude_points_calculated_v2_6_with_phase_profiles ``` — 8,564 fights × ~400 columns, adds 12-phase skill percentiles (full-history + 3-year era-windowed). Does not have `STANCE`; cross-reference by `fight_url` against `_with_stance` if a use needs both. Moved to `ipynb and old datasets/`.
+The weekly refresh described in earlier sections (`fighter_scrape_new.py` → `ude_scrape_new.py` → ETL → scoring, previously run by hand) is now automated via GitHub Actions, in the project's repo (`OsyTheDataGuy/ude_points_util`). Live as of 31 August 2026.
 
-* ```text latest_fights_up_to_islam_garry_with_ude_points_calculated_v2_5 ``` — Superseded by v2_6. Retained, not deleted, as a pre-fix historical snapshot. Still in the main folder (not part of the 26 Aug reorg).
+**Trigger:** `.github/workflows/refresh_dataset.yml` fires on the manual "Run workflow" button (`workflow_dispatch`) or automatically every Monday 06:00 UTC (`schedule`). The schedule only fires once this file is on the repo's default branch — a schedule defined on an unmerged branch/PR is never registered.
 
-* ```text project_history.md ``` — Chronological record of how the current state was reached; not required reading to continue the project.
+**Pipeline, in order:** fetch the latest `ufc_fighter_tott.csv`/`ufc_fight_details.csv`/`ufc_event_details.csv` from greco1899's GitHub → `ude_scrape_new.py` (incremental: only fights not already in `current_df.csv`) → `fighter_scrape_new.py` (incremental: only new fighters, fighters who just fought — the "active" trigger, since UFCStats' listed Weight tracks current division — or fighters with an incomplete bio profile still under their retry cap) → `run_refresh.py` (chains `run_etl_pipeline` → Stance backfill → `engineer_all_features` → `calculate_ude_points_with_ablation` → `add_ude_points_difference_columns` → `validate_dataset_regeneration`) → open a PR.
+
+**Incremental-scrape design (`fighter_scrape_new.py`):** a fighter with a genuinely permanent bio gap (e.g. UFCStats never measured an older/retired fighter's Reach — true for ~43% of the roster) is capped at `MAX_INCOMPLETE_RESCRAPE_ATTEMPTS = 3` re-scrape attempts via a persisted `bio_scrape_attempts` column in `fighters_df.csv`, so the "incomplete" trigger doesn't re-visit the same few thousand permanently-incomplete fighters on every single run.
+
+**Validation gate:** `validate_dataset_regeneration` compares the newly regenerated file against the prior production file and raises (failing the job, before any PR is opened) on any lost `fight_url` or any changed column not explicitly allow-listed. A run that fails here produces no PR at all — check the failed Actions run's log directly in that case, there's nothing to approve.
+
+**PR as the human-confirmation gate:** on success, the workflow opens a PR (`peter-evans/create-pull-request`) with the validation summary as its body. Merging the PR is the only manual step in the loop — and merging **atomically updates `current_df.csv` and `fighters_df.csv` in place**: `run_refresh.py --output` writes directly to `current_df.csv` (safe because it's fully loaded into memory before that write happens), so there is no separate "rename the output forward" step anymore. Steady-state loop: PR appears → read the report in its body → merge if it looks sane.

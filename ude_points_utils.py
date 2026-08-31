@@ -740,6 +740,8 @@ def rank_fighters_by_shrunk_ude_rate(df, prior_strength=10.0, min_fights=None):
 
     Args:
     - df (pd.DataFrame): The scored fight dataset (post ude_points_algorithm).
+      Does not need to be the full dataset -- see career_point_gain note
+      below for what passing a filtered subset (e.g. one division) means.
     - prior_strength (float): Bayesian shrinkage prior strength, in
       equivalent number of fights. Default 10.0, consistent with the
       project's existing shrinkage convention.
@@ -752,21 +754,47 @@ def rank_fighters_by_shrunk_ude_rate(df, prior_strength=10.0, min_fights=None):
       excluding sparse careers from the prior itself would bias the shrinkage
       target for everyone else.
 
+    career_point_gain is the sum of this fighter's own ude_points_diff
+    values, summed ONLY over the fights present in `df` -- not a snapshot
+    of their career-wide cumulative ledger. For the full, unfiltered
+    dataset these are mathematically identical (the ledger IS the running
+    sum of every diff from a 500-point start), so this is a no-op for
+    rank_fighters_by_shrunk_ude_rate's own direct use (§2a). They diverge
+    for a filtered subset, though -- which is exactly what
+    rank_fighters_by_shrunk_ude_rate_by_weight_class and
+    rank_fighters_by_shrunk_ude_rate_by_gender pass in. A ledger snapshot
+    at a fighter's last fight in the filtered subset would still carry
+    whatever they earned or lost in fights OUTSIDE it (a different division,
+    a fight excluded by the year filter): confirmed this materially
+    distorted real results before the fix -- e.g. Frankie Edgar's old LW
+    title run was inflating his FW-scoped ranking, and Jose Aldo's mixed BW
+    stint was deflating his. Summing directly within `df` fixes this by
+    construction: it can only reflect fights actually passed in. See
+    project_history.md #51.
+
     Returns:
     - pd.DataFrame with columns: fighter, fighter_url, age, record, n_fights,
       career_point_gain, raw_rate, shrunk_rate, rank. Sorted descending by
       shrunk_rate.
     """
-    # Reuse the existing career-total logic to get each fighter's final
-    # cumulative UDE points, age, and record at their last fight.
+    # age/record still come from the fighter's last fight WITHIN df -- correct
+    # as-is for both the full population and a filtered subset.
     latest_ude_points = get_latest_ude_points_with_details(df)
     ude_points_df = pd.DataFrame.from_dict(latest_ude_points, orient='index')
     ude_points_df.reset_index(inplace=True)
     ude_points_df.rename(columns={'index': 'fighter_url'}, inplace=True)
 
-    # Career point gain relative to the fixed starting value of 500.
-    STARTING_UDE_POINTS = 500.0
-    ude_points_df['career_point_gain'] = ude_points_df['latest_ude_points'] - STARTING_UDE_POINTS
+    # career_point_gain: summed directly from df's own ude_points_diff
+    # columns (both sides), not read off the career-wide ledger -- see the
+    # docstring above for why this matters for a filtered subset.
+    fighter_1_diffs = df[['fighter_url_fighter_1', 'ude_points_diff_fighter_1']].rename(
+        columns={'fighter_url_fighter_1': 'fighter_url', 'ude_points_diff_fighter_1': 'diff'})
+    fighter_2_diffs = df[['fighter_url_fighter_2', 'ude_points_diff_fighter_2']].rename(
+        columns={'fighter_url_fighter_2': 'fighter_url', 'ude_points_diff_fighter_2': 'diff'})
+    point_gains = pd.concat([fighter_1_diffs, fighter_2_diffs]).groupby('fighter_url')['diff'].sum()
+    point_gains.name = 'career_point_gain'
+
+    ude_points_df = ude_points_df.merge(point_gains, left_on='fighter_url', right_index=True, how='left')
 
     # Count total scored fights per fighter_url from both sides of the dataset.
     fighter_1_urls = df[['fighter_url_fighter_1']].rename(columns={'fighter_url_fighter_1': 'fighter_url'})
@@ -848,21 +876,70 @@ def rank_fighters_by_shrunk_ude_rate_by_weight_class(df, weight_class=None, star
     less meaningful prior for a division-scoped question.
 
     Note: UDE ratings are one running per-fighter ledger, not reset per
-    weight class -- a fighter's ude_points_post_fight already carries
-    whatever they earned in OTHER divisions before their first fight in
-    `weight_class`. career_point_gain here is still `latest - 500` measured
-    only across the filtered fight set, so a fighter who built up points
-    elsewhere before moving to this division will still show gain here
-    that isn't attributable to their performance at `weight_class` alone.
-    Fine for "who scores best while fighting at FW"; not a clean
-    division-isolated resume by itself -- see canonical_project_state.md
-    section 6 for the related (and much larger) open problem of
-    era/division-strength normalization generally.
+    weight class -- but rank_fighters_by_shrunk_ude_rate's career_point_gain
+    is summed directly from the fights actually passed to it (see that
+    function's own docstring), so a fighter's ledger value from OTHER
+    divisions does not bleed into their score here. Confirmed this mattered
+    in practice, not just in theory: before this was fixed, Frankie Edgar's
+    old LW title run was inflating his FW-scoped ranking, and Jose Aldo's
+    mixed BW stint was deflating his -- see project_history.md #51. What's
+    still NOT accounted for is competition strength -- a dominant run in a
+    shallow division-era scores the same as one in a stacked one -- see
+    canonical_project_state.md section 6 for that separate, much larger,
+    open problem.
 
     Args: see rank_fighters_by_shrunk_ude_rate. weight_class/start_year/end_year
     are applied as pre-filters before that function runs.
     """
     filtered_df = filter_by_weight_class(df, weight_class)
+    filtered_df = filter_by_year(filtered_df, start_year, end_year)
+    return rank_fighters_by_shrunk_ude_rate(filtered_df, prior_strength=prior_strength, min_fights=min_fights)
+
+
+MENS_WEIGHT_CLASSES = ['LW', 'WW', 'MW', 'FW', 'BW', 'LHW', 'HW', 'FLW']
+WOMENS_WEIGHT_CLASSES = ['WSW', 'WFLW', 'WBW', 'WFW']
+
+
+def filter_by_gender(df, gender=None):
+    """
+    Filter fights to one gender's divisions, by weight_class_cleaned code --
+    every women's division code is 'W' + the men's code (e.g. 'BW' vs
+    'WBW'), a naming convention already baked in by map_weight_class. None
+    returns the full dataframe unchanged.
+
+    'Catch Weight Bout' and 'Open Weight Bout' rows (85 fights in the
+    current dataset) aren't attributable to either gender and are excluded
+    from BOTH 'M' and 'F', not just the one not requested. A fighter who
+    had one of these bouts will show one fewer n_fights here than in an
+    unfiltered ranking that includes it.
+    """
+    if gender is None:
+        return df.copy()
+    if gender == 'M':
+        return df[df['weight_class_cleaned'].isin(MENS_WEIGHT_CLASSES)].copy()
+    if gender == 'F':
+        return df[df['weight_class_cleaned'].isin(WOMENS_WEIGHT_CLASSES)].copy()
+    raise ValueError(f"gender must be 'M', 'F', or None, got {gender!r}")
+
+
+def rank_fighters_by_shrunk_ude_rate_by_gender(df, gender=None, start_year=None,
+                                                end_year=None, prior_strength=10.0, min_fights=None):
+    """
+    rank_fighters_by_shrunk_ude_rate(), scoped to one gender's divisions
+    and/or an event-date year range -- e.g. "who scores best among female
+    fighters between 2015 and 2020."
+
+    population_mean_rate (the shrinkage target) is computed from THIS
+    filtered population, not the full roster -- same reasoning as
+    rank_fighters_by_shrunk_ude_rate_by_weight_class: a female fighter
+    should be shrunk toward the female population's own mean rate, not a
+    promotion-wide mean dominated by the much larger male fight count.
+
+    Args: see rank_fighters_by_shrunk_ude_rate. gender is 'M', 'F', or None
+    (no gender filter); start_year/end_year are applied the same way as in
+    the weight-class version.
+    """
+    filtered_df = filter_by_gender(df, gender)
     filtered_df = filter_by_year(filtered_df, start_year, end_year)
     return rank_fighters_by_shrunk_ude_rate(filtered_df, prior_strength=prior_strength, min_fights=min_fights)
 
