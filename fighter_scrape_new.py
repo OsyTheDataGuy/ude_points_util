@@ -18,10 +18,23 @@ A fighter's URL is scraped if ANY of these hold:
                   division change has become visible on their bio page is
                   that they just had a fight.
   3. Incomplete -- any of Height/Weight/Reach/STANCE/DOB is blank in
-                  --existing-fighters-csv, e.g. because UFCStats hadn't
-                  published it yet last time this ran.
+                  --existing-fighters-csv AND this fighter has been
+                  re-scraped for that reason fewer than
+                  MAX_INCOMPLETE_RESCRAPE_ATTEMPTS times already (tracked in
+                  the persisted 'bio_scrape_attempts' column). Capped
+                  deliberately: some gaps are permanent, not temporary --
+                  1,994 of 4,588 fighters (43%) are missing Reach, mostly
+                  older/retired fighters UFCStats never measured and never
+                  will. Without a cap, "incomplete" would re-visit that same
+                  ~2,000-fighter set every single run forever, which is
+                  exactly what made the first real run take ~9 of its ~11
+                  minutes on this step alone. After the cap, a still-missing
+                  field is treated as a stable, accepted gap rather than a
+                  bug to keep chasing -- same "neutral state, not a defect"
+                  pattern used elsewhere in this project.
 
-Everyone else (known, not recently active, complete profile) is skipped.
+Everyone else (known, not recently active, complete profile, or already at
+the incomplete-retry cap) is skipped.
 Without --existing-fighters-csv, there's nothing to compare against, so
 every fighter in --tott-csv is scraped -- this preserves the original
 full-scrape behavior for a cold start.
@@ -131,6 +144,10 @@ def scrape_fighter(url, max_attempts=3, retry_delay_seconds=5):
     return {"URL": url, "Error": str(last_error)}
 
 
+ATTEMPTS_COL = "bio_scrape_attempts"
+MAX_INCOMPLETE_RESCRAPE_ATTEMPTS = 3
+
+
 def _is_missing(value):
     return pd.isna(value) or str(value).strip() in ("", "--")
 
@@ -164,6 +181,13 @@ def determine_urls_to_scrape(tott_df, existing_df, latest_fights_df):
         incomplete_mask = existing_df[present_bio_fields].apply(
             lambda col: col.apply(_is_missing)
         ).any(axis=1)
+        if ATTEMPTS_COL in existing_df.columns:
+            under_attempt_cap = existing_df[ATTEMPTS_COL].fillna(0) < MAX_INCOMPLETE_RESCRAPE_ATTEMPTS
+        else:
+            # No attempts column yet (e.g. a roster from before this cap
+            # existed) -- everyone's eligible for their first tracked try.
+            under_attempt_cap = pd.Series(True, index=existing_df.index)
+        incomplete_mask = incomplete_mask & under_attempt_cap
         incomplete_urls = set(existing_df.loc[incomplete_mask, "URL"])
 
     urls_to_scrape = new_urls | active_urls | incomplete_urls
@@ -183,6 +207,14 @@ def merge_scraped_results(existing_df, scraped_records):
     from the merge rather than overwriting a previously-good row with
     blanks -- a transient failure this run shouldn't erase last run's
     successfully-scraped data.
+
+    Also updates ATTEMPTS_COL for every successfully-scraped row: reset to
+    0 if the profile is now complete, incremented from its prior count
+    (regardless of WHY this fighter was scraped -- new/active/incomplete)
+    if it's still missing a field. A genuinely permanent gap (UFCStats will
+    never publish a retired fighter's Reach) needs to age out of the
+    "incomplete" trigger the same way whether this was its first visit or
+    its fifth.
     """
     scraped_df = pd.DataFrame(scraped_records)
     if "Error" in scraped_df.columns:
@@ -190,6 +222,23 @@ def merge_scraped_results(existing_df, scraped_records):
         if failed_mask.any():
             tqdm.write(f"⚠️ {failed_mask.sum()} URL(s) failed to scrape -- keeping prior data for them, if any.")
         scraped_df = scraped_df.loc[~failed_mask].drop(columns=["Error"])
+
+    prior_attempts = {}
+    if existing_df is not None and not existing_df.empty and ATTEMPTS_COL in existing_df.columns:
+        prior_attempts = existing_df.set_index("URL")[ATTEMPTS_COL].to_dict()
+
+    def _safe_int(x, default=0):
+        try:
+            return default if pd.isna(x) else int(x)
+        except (TypeError, ValueError):
+            return default
+
+    if not scraped_df.empty:
+        still_incomplete = scraped_df[BIO_FIELDS].apply(lambda col: col.apply(_is_missing)).any(axis=1)
+        scraped_df[ATTEMPTS_COL] = [
+            (_safe_int(prior_attempts.get(url, 0)) + 1) if incomplete else 0
+            for url, incomplete in zip(scraped_df["URL"], still_incomplete)
+        ]
 
     if existing_df is None or existing_df.empty:
         return scraped_df
