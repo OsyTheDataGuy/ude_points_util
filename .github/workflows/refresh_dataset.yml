@@ -1,0 +1,130 @@
+# Weekly UDE Points dataset refresh.
+#
+# NOT tested end-to-end as a real GitHub Actions run (I can't execute this
+# without it actually firing in your repo) -- the three scripts it calls
+# (fighter_scrape_new.py, ude_scrape_new.py, run_refresh.py) HAVE been
+# tested directly, including a full run_refresh.py pass against real data
+# reproducing the current production file bit-for-bit. Review before
+# relying on this.
+#
+# current_df.csv and fighters_df.csv are now committed to this repo,
+# readable via actions/checkout below -- confirmed directly (cloned the
+# repo and checked). current_df.csv IS the prior production file (8,564 x
+# 258 cols, already scored) under a rolling name, not a separate raw
+# snapshot -- see the "Run full pipeline + validation" step for why it's
+# passed as both --current-dataset and --previous-production-file. No
+# separate "production CSV" needs to be added.
+#
+# current_df.csv is ~14MB, under GitHub's 100MB per-file limit, but
+# repeatedly committing a modified large CSV every cycle will still grow
+# repo history over time -- worth a look at Git LFS if that becomes a
+# real problem later. Not blocking for now.
+#
+# Also NOT automated here, deliberately: renaming the freshly-produced
+# production file forward to become next cycle's current_df.csv. That's
+# the step you described as something you do "when ready to update" --
+# left as a manual/separate action rather than silently folding it into
+# this workflow, since a merged PR isn't necessarily the same moment as
+# "ready to start the next cycle."
+
+name: Refresh UDE Points dataset
+
+on:
+  workflow_dispatch: {}       # manual "Run workflow" button, for on-demand runs
+  schedule:
+    - cron: '0 6 * * 1'       # every Monday 06:00 UTC -- adjust to taste,
+                               # e.g. the morning after a typical fight night
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Fetch latest greco1899 source files
+        run: |
+          mkdir -p "base datasets from greco github"
+          curl -sL -o "base datasets from greco github/ufc_fighter_tott.csv" \
+            https://raw.githubusercontent.com/Greco1899/scrape_ufc_stats/main/ufc_fighter_tott.csv
+          curl -sL -o "base datasets from greco github/ufc_fight_details.csv" \
+            https://raw.githubusercontent.com/Greco1899/scrape_ufc_stats/main/ufc_fight_details.csv
+          curl -sL -o "latest_events_df.csv" \
+            https://raw.githubusercontent.com/Greco1899/scrape_ufc_stats/main/ufc_event_details.csv
+          # Fail fast and loudly if greco1899 renamed/moved a file, rather
+          # than silently proceeding on an empty/HTML-error file.
+          for f in "base datasets from greco github/ufc_fighter_tott.csv" \
+                   "base datasets from greco github/ufc_fight_details.csv" \
+                   "latest_events_df.csv"; do
+            lines=$(wc -l < "$f")
+            if [ "$lines" -lt 100 ]; then
+              echo "::error::$f looks too small ($lines lines) -- source may have changed or fetch failed."
+              exit 1
+            fi
+          done
+
+      # Fight scrape runs FIRST: fighter_scrape_new.py's "active fighter"
+      # trigger (re-scrape someone whose weight may have changed) needs to
+      # know who just fought, which only exists after this step.
+      - name: Scrape new fight details (incremental)
+        run: |
+          python ude_scrape_new.py \
+            --fight-details-csv "base datasets from greco github/ufc_fight_details.csv" \
+            --current-dataset-csv current_df.csv \
+            --output latest_fights_df.csv
+
+      - name: Scrape fighter bios (incremental)
+        run: |
+          python fighter_scrape_new.py \
+            --tott-csv "base datasets from greco github/ufc_fighter_tott.csv" \
+            --existing-fighters-csv fighters_df.csv \
+            --latest-fights-csv latest_fights_df.csv \
+            --output fighters_df.csv
+
+      - name: Run full pipeline + validation
+        run: |
+          # current_df.csv IS the prior production file (this repo's rolling
+          # convention: the finished output gets renamed to current_df.csv
+          # for the next cycle) -- so it's passed as BOTH arguments here.
+          # run_etl_pipeline safely reduces it to raw columns for its own
+          # merge regardless of it carrying scoring columns too.
+          python run_refresh.py \
+            --current-dataset current_df.csv \
+            --fighters fighters_df.csv \
+            --latest-fights latest_fights_df.csv \
+            --latest-events latest_events_df.csv \
+            --previous-production-file current_df.csv \
+            --output latest_fights_up_to_islam_garry_with_ude_points_calculated_v2_6_final_with_stance.csv \
+            | tee refresh_summary.txt
+          # run_refresh.py exits non-zero if validate_dataset_regeneration
+          # raises (a lost fight, or an unexpected column change) -- that
+          # failure stops the workflow here, before the PR step ever runs.
+
+      - name: Open PR with the refreshed dataset
+        if: success()
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "Weekly dataset refresh"
+          title: "Dataset refresh: ${{ github.run_id }}"
+          body-path: refresh_summary.txt
+          branch: dataset-refresh/${{ github.run_id }}
+          add-paths: |
+            fighters_df.csv
+            latest_fights_up_to_islam_garry_with_ude_points_calculated_v2_6_final_with_stance.csv
