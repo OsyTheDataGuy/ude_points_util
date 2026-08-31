@@ -1,0 +1,6 @@
+pandas
+numpy
+statsmodels
+beautifulsoup4
+playwright
+tqdm

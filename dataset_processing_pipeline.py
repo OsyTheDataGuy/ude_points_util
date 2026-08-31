@@ -311,10 +311,22 @@ def drop_rows_with_null_event_date(df: pd.DataFrame, date_col: str = 'event_date
 # ==============================================================================
 # 6. ETL Pipeline validator
 # ==============================================================================
-def validate_transformed_data(df: pd.DataFrame, max_null_pct: float = 0.05, verbose: bool = True) -> None:
+def validate_transformed_data(df: pd.DataFrame, max_null_pct: float = 0.05, verbose: bool = True,
+                               current_dataset: pd.DataFrame = None) -> None:
     """
     Executes post-transformation sanity checks on the processed dataset.
     Prints status updates for each check and raises warnings/errors if invariants are violated.
+
+    current_dataset (optional): the historical dataset this batch is about
+    to be appended to (run_etl_pipeline's own current_dataset argument).
+    When supplied, adds a check that none of `df`'s fight_url values already
+    exist in current_dataset. This call runs on the freshly-scraped batch
+    BEFORE current_dataset is merged in (see run_etl_pipeline step 13), so
+    the Primary Key Uniqueness check below only ever sees this batch in
+    isolation -- it cannot catch a fight that's genuinely new to this batch
+    but was already scraped and merged in on a previous run (e.g. an
+    incremental-fight-filter bug in the upstream scraper re-including
+    something already processed). Only this explicit cross-check can.
     """
     import warnings
 
@@ -386,10 +398,144 @@ def validate_transformed_data(df: pd.DataFrame, max_null_pct: float = 0.05, verb
         status = f"✓ [PASS] Join Coverage (<{max_null_pct:.0%} Nulls)" if null_warnings == 0 else f"⚠️ [WARN] Join Coverage ({null_warnings} columns exceeded null threshold)"
         print(status)
 
+    # 6. No Duplicate vs. History (only runs if current_dataset supplied)
+    if current_dataset is not None and 'fight_url' in df.columns and 'fight_url' in current_dataset.columns:
+        already_seen = df['fight_url'].isin(current_dataset['fight_url'])
+        n_already_seen = int(already_seen.sum())
+        if n_already_seen > 0:
+            raise ValueError(
+                f"❌ [FAIL] No-Duplicate-vs-History Check: {n_already_seen} row(s) in this batch "
+                f"have a fight_url already present in current_dataset -- likely a re-scrape of "
+                f"already-processed fights. Affected fight_urls:\n"
+                f"{df.loc[already_seen, 'fight_url'].to_string(index=False)}"
+            )
+        checks_executed += 1
+        if verbose:
+            print("✓ [PASS] No Duplicate vs. History (fight_url not already in current_dataset)")
+
     if verbose:
         print("-" * 50)
         print(f"Validation Complete: {checks_executed} quality suites executed.")
         print("=" * 50 + "\n")
+
+
+def validate_dataset_regeneration(old_df: pd.DataFrame, new_df: pd.DataFrame, key_col: str = 'fight_url',
+                                   columns_expected_to_change: list = None, verbose: bool = True) -> dict:
+    """
+    Compares a prior fully-processed dataset against a freshly regenerated
+    one, joined on `key_col`, and reports exactly what changed. Formalizes
+    the ad hoc diff checks this project has run by hand after every
+    regeneration this session (STANCE casing fix, the ordered_columns/
+    reset_index fixes, the decisive/close-wins classification fix, the
+    UFC 330 stance addition) -- each of those was verified the same way:
+    same row count and key set, then a column-by-column value diff against
+    an explicit list of columns expected to change.
+
+    Unlike validate_transformed_data (which runs on raw ETL output, before
+    feature engineering or UDE scoring even happen), this is meant to run
+    on the FINAL output of the full pipeline -- after engineer_all_features,
+    calculate_ude_points_with_ablation, and add_ude_points_difference_columns
+    -- since that's the only stage where a regression in pdi_margin, a UDE
+    point, or an engineered feature would actually be visible. The two
+    validators check different things at different pipeline stages and are
+    both needed; neither can do the other's job.
+
+    columns_expected_to_change: columns allowed to differ without raising
+    (e.g. the classification-count columns for the phase-magnitude rounding
+    fix). Any OTHER column that differs raises -- an unexpected column
+    changing during what should be a routine data refresh is exactly the
+    failure mode this project has hit multiple times (a column silently
+    dropped, a stray column silently created, a fix's blast radius turning
+    out wider than expected). Row-count and key-set mismatches always raise
+    regardless of columns_expected_to_change, since a missing or duplicated
+    fight is never an acceptable "expected change."
+
+    Returns a dict: {'new_keys': set, 'missing_keys': set,
+    'changed_columns': {col: n_rows_differing}, 'unexpected_changes': bool}.
+    """
+    if verbose:
+        print("\n" + "=" * 50)
+        print(" DATASET REGENERATION DIFF")
+        print("=" * 50)
+
+    columns_expected_to_change = set(columns_expected_to_change or [])
+
+    old_keys = set(old_df[key_col])
+    new_keys = set(new_df[key_col])
+    added_keys = new_keys - old_keys
+    missing_keys = old_keys - new_keys
+
+    if missing_keys:
+        raise ValueError(
+            f"❌ [FAIL] {len(missing_keys)} {key_col} value(s) present in the old dataset are "
+            f"missing from the new one -- a regeneration should never lose a previously-processed "
+            f"fight. Sample: {list(missing_keys)[:5]}"
+        )
+    if verbose:
+        print(f"✓ [PASS] No {key_col} values lost ({len(added_keys)} new added, "
+              f"{len(old_keys & new_keys)} shared)")
+
+    shared = old_df[old_df[key_col].isin(old_keys & new_keys)]
+    new_shared = new_df[new_df[key_col].isin(old_keys & new_keys)]
+    merged = shared.merge(new_shared, on=key_col, suffixes=('_old', '_new'))
+
+    common_cols = [c for c in old_df.columns if c in new_df.columns and c != key_col]
+    changed_columns = {}
+    for c in common_cols:
+        a, b = merged[f'{c}_old'], merged[f'{c}_new']
+        both_null = a.isna() & b.isna()
+        only_one_null = a.isna() ^ b.isna()
+        if a.dtype.kind in 'biufc' and b.dtype.kind in 'biufc':
+            # (a - b) is NaN whenever either side is NaN, and NaN > 1e-9 is
+            # always False -- so a real regression where a numeric value
+            # silently becomes NaN (or vice versa) would otherwise never be
+            # caught. only_one_null closes that gap explicitly. both_null
+            # needs no explicit handling here: NaN > 1e-9 already reads as
+            # "no difference" for it, correctly.
+            n_diff = int((((a - b).abs() > 1e-9) | only_one_null).sum())
+        else:
+            # both_null must be excluded explicitly here: pandas represents
+            # a missing value as NaN after a CSV round-trip but as Python
+            # None on a value fresh out of the pipeline (e.g. dominant_fighter),
+            # and str(NaN) != str(None) -- without this, "no dominant fighter"
+            # on both sides reads as a value CHANGE purely from which null
+            # representation each side happened to use. Confirmed live: this
+            # was the exact and only cause of an apparent 4,649-row
+            # dominant_fighter "regression" that wasn't real.
+            n_diff = int(((a.astype(str) != b.astype(str)) & ~both_null).sum())
+        if n_diff > 0:
+            changed_columns[c] = n_diff
+
+    unexpected = {c: n for c, n in changed_columns.items() if c not in columns_expected_to_change}
+
+    if verbose:
+        if changed_columns:
+            print(f"Columns that differ on shared {key_col}s:")
+            for c, n in changed_columns.items():
+                flag = "" if c in columns_expected_to_change else "  <-- UNEXPECTED"
+                print(f"  {c}: {n} row(s) differ{flag}")
+        else:
+            print("No column-level differences on shared rows.")
+
+    if unexpected:
+        raise ValueError(
+            f"❌ [FAIL] {len(unexpected)} column(s) changed unexpectedly (not in "
+            f"columns_expected_to_change): {list(unexpected.keys())}. Either this regeneration "
+            f"has a real regression, or columns_expected_to_change needs updating to reflect an "
+            f"intentional change -- don't silence this by widening the allowlist without checking which."
+        )
+
+    if verbose:
+        print("-" * 50)
+        print("Validation Complete: regeneration diff is fully accounted for.")
+        print("=" * 50 + "\n")
+
+    return {
+        'new_keys': added_keys,
+        'missing_keys': missing_keys,
+        'changed_columns': changed_columns,
+        'unexpected_changes': bool(unexpected),
+    }
 
 
 # ==============================================================================
@@ -471,7 +617,7 @@ def run_etl_pipeline(
     final_df = convert_to_one_fight_one_row(df_pct_fixed)
 
     # Validate output schema & values before column ordering
-    validate_transformed_data(final_df)
+    validate_transformed_data(final_df, current_dataset=current_dataset)
 
     # 12. Standard desired column ordering
     ordered_columns = [
