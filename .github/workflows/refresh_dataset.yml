@@ -20,12 +20,14 @@
 # repo history over time -- worth a look at Git LFS if that becomes a
 # real problem later. Not blocking for now.
 #
-# Also NOT automated here, deliberately: renaming the freshly-produced
-# production file forward to become next cycle's current_df.csv. That's
-# the step you described as something you do "when ready to update" --
-# left as a manual/separate action rather than silently folding it into
-# this workflow, since a merged PR isn't necessarily the same moment as
-# "ready to start the next cycle."
+# current_df.csv is written IN PLACE as this run's own output (see
+# "Run full pipeline + validation" below) -- merging the PR both accepts
+# this cycle's data AND promotes it to next cycle's starting point, in one
+# step. This used to be a separate manual "rename the output forward"
+# action performed after merging; it's folded in now at your request.
+# Tradeoff worth knowing: a merged PR is now the SAME moment as "ready to
+# start the next cycle" -- there's no longer a gap where you can approve
+# this batch's data without also committing to it as the next baseline.
 
 name: Refresh UDE Points dataset
 
@@ -101,21 +103,24 @@ jobs:
       - name: Run full pipeline + validation
         run: |
           # current_df.csv IS the prior production file (this repo's rolling
-          # convention: the finished output gets renamed to current_df.csv
-          # for the next cycle) -- so it's passed as BOTH arguments here.
-          # run_etl_pipeline safely reduces it to raw columns for its own
-          # merge regardless of it carrying scoring columns too.
+          # convention) -- read as BOTH --current-dataset and
+          # --previous-production-file. run_refresh.py loads both fully
+          # into memory before writing anything, so pointing --output at
+          # this same path is safe: it overwrites current_df.csv in place
+          # with this cycle's newly regenerated, newly-validated file.
           python run_refresh.py \
             --current-dataset current_df.csv \
             --fighters fighters_df.csv \
             --latest-fights latest_fights_df.csv \
             --latest-events latest_events_df.csv \
             --previous-production-file current_df.csv \
-            --output latest_fights_up_to_islam_garry_with_ude_points_calculated_v2_6_final_with_stance.csv \
+            --output current_df.csv \
             | tee refresh_summary.txt
           # run_refresh.py exits non-zero if validate_dataset_regeneration
           # raises (a lost fight, or an unexpected column change) -- that
-          # failure stops the workflow here, before the PR step ever runs.
+          # failure stops the workflow here, before the PR step ever runs,
+          # so current_df.csv on disk is left untouched on the runner and
+          # nothing gets committed.
 
       - name: Open PR with the refreshed dataset
         if: success()
@@ -127,4 +132,4 @@ jobs:
           branch: dataset-refresh/${{ github.run_id }}
           add-paths: |
             fighters_df.csv
-            latest_fights_up_to_islam_garry_with_ude_points_calculated_v2_6_final_with_stance.csv
+            current_df.csv
