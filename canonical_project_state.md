@@ -54,28 +54,28 @@ Per fighter-side, per fight, in order: `raw_base_points` (±3 W/L) → `champion
 
 | Rank | Fighter | Record | Fights | Career Gain | Shrunk Rate |
 |---|---|---|---|---|---|
-| 1 | Georges St-Pierre | 20-2-0 | 22 | 154.8 | 4.430 |
-| 2 | Jon Jones | 22-1-0 | 24 | 158.4 | 4.276 |
-| 3 | Islam Makhachev | 18-1-0 | 19 | 110.9 | 3.375 |
+| 1 | Georges St-Pierre | 20-2-0 | 22 | 154.7 | 4.429 |
+| 2 | Jon Jones | 22-1-0 | 24 | 158.0 | 4.265 |
+| 3 | Islam Makhachev | 18-1-0 | 19 | 110.9 | 3.376 |
 | 4 | Demetrious Johnson | 15-2-1 | 18 | 89.0 | 2.714 |
 | 5 | Amanda Nunes | 16-2-0 | 18 | 82.9 | 2.497 |
-| 6 | Valentina Shevchenko | 15-3-1 | 19 | 81.2 | 2.351 |
+| 6 | Valentina Shevchenko | 15-3-1 | 19 | 81.3 | 2.353 |
 | 7 | Khabib Nurmagomedov | 13-0-0 | 13 | 67.0 | 2.345 |
 | 8 | Alexander Volkanovski | 15-3-0 | 18 | 76.0 | 2.249 |
 | 9 | Justin Gaethje | 11-5-0 | 16 | 57.1 | 1.695 |
-| 10 | Merab Dvalishvili | 14-3-0 | 17 | 56.4 | 1.607 |
-| 11 | Dricus Du Plessis | 10-1-0 | 11 | 44.5 | 1.497 |
-| 12 | Daniel Cormier | 11-3-0 | 15 | 50.0 | 1.478 |
-| 13 | Ilia Topuria | 9-1-0 | 10 | 42.5 | 1.476 |
+| 10 | Merab Dvalishvili | 14-3-0 | 17 | 56.5 | 1.608 |
+| 11 | Dricus Du Plessis | 10-1-0 | 11 | 44.5 | 1.498 |
+| 12 | Daniel Cormier | 11-3-0 | 15 | 50.0 | 1.479 |
+| 13 | Ilia Topuria | 9-1-0 | 10 | 42.6 | 1.476 |
 | 14 | Francis Ngannou | 12-2-0 | 14 | 46.4 | 1.392 |
 | 15 | Alex Pereira | 10-3-0 | 13 | 44.0 | 1.347 |
 | 16 | Alexandre Pantoja | 14-4-0 | 18 | 49.5 | 1.302 |
-| 17 | Movsar Evloev | 10-0-0 | 10 | 38.9 | 1.293 |
-| 18 | Aljamain Sterling | 18-5-0 | 23 | 54.0 | 1.241 |
-| 19 | Benson Henderson | 11-3-0 | 14 | 42.7 | 1.235 |
-| 20 | Petr Yan | 12-4-0 | 16 | 44.6 | 1.216 |
+| 17 | Movsar Evloev | 10-0-0 | 10 | 38.9 | 1.292 |
+| 18 | Aljamain Sterling | 18-5-0 | 23 | 54.0 | 1.240 |
+| 19 | Benson Henderson | 11-3-0 | 14 | 42.6 | 1.234 |
+| 20 | Petr Yan | 12-4-0 | 16 | 44.7 | 1.216 |
 
-623 fighters clear the `n_fights >= 10` floor (up from 619 at the v2.6-era snapshot, as new fights push more careers past the threshold). Topuria, Evloev, Dricus Du Plessis, and Alex Pereira sit closest to it (10–13 fights). Top-20 membership and order are unchanged from the prior snapshot — the small shifts in Shrunk Rate (third decimal place) come entirely from `population_mean_rate` moving slightly as new fights enter the full population; none of these 20 fighters personally had a new fight added.
+623 fighters clear the `n_fights >= 10` floor. Topuria, Evloev, Dricus Du Plessis, and Alex Pereira sit closest to it (10–13 fights). Top-20 membership and order are unchanged from the prior snapshot — the sub-0.002 shifts in Shrunk Rate are recalibration drift from the `project_history.md` #52 opponent-scramble correction (26 rebuilt rows across UFC 19–23 and the 2023-08-26 card), nudging `population_mean_rate` and the rolling method/age calibration curves; none of these 20 fighters had a fight of their own materially rescored. That same correction reordered two virtually-tied pairs *outside* this table: heavyweight #3/#4 (Miocic ↔ Aspinall) and bantamweight #1/#2 (Dillashaw ↔ Dvalishvili) in `rank_fighters_by_shrunk_ude_rate_by_weight_class`, each a sub-0.003 `shrunk_rate` gap.
 
 ---
 
