@@ -123,6 +123,7 @@ jobs:
           # nothing gets committed.
 
       - name: Open PR with the refreshed dataset
+        id: cpr
         if: success()
         uses: peter-evans/create-pull-request@v6
         with:
@@ -130,6 +131,48 @@ jobs:
           title: "Dataset refresh: ${{ github.run_id }}"
           body-path: refresh_summary.txt
           branch: dataset-refresh/${{ github.run_id }}
+          # Assigning + review-requesting the repo owner is what produces the
+          # in-GitHub notification (bell + the account's own email settings).
+          # Change this if the GitHub username is not "OsyTheDataGuy".
+          assignees: OsyTheDataGuy
+          reviewers: OsyTheDataGuy
           add-paths: |
             fighters_df.csv
             current_df.csv
+
+      # Explicit email so a waiting PR can't be silently forgotten again, even
+      # if GitHub account notifications are off/misrouted. Only fires when a PR
+      # was actually created or updated (create-pull-request sets
+      # pull-request-number empty when the refresh produced no changes).
+      #
+      # Requires two repo secrets (Settings -> Secrets and variables -> Actions):
+      #   MAIL_USERNAME  the Gmail address that sends  (e.g. uononso@gmail.com)
+      #   MAIL_PASSWORD  a Gmail *App Password* (16 chars, NOT the real password;
+      #                  needs 2-Step Verification on -> myaccount.google.com/apppasswords)
+      - name: Email that a refresh PR is waiting
+        if: success() && steps.cpr.outputs.pull-request-number != ''
+        # A mail-server hiccup or missing secret must not red-X a run whose PR
+        # and GitHub notification already succeeded -- the failure still shows
+        # in the step log.
+        continue-on-error: true
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          from: UDE Points Refresh <${{ secrets.MAIL_USERNAME }}>
+          to: uononso@gmail.com
+          subject: "UDE Points refresh: PR #${{ steps.cpr.outputs.pull-request-number }} needs review"
+          body: |
+            A weekly dataset refresh finished and ${{ steps.cpr.outputs.pull-request-operation }} a pull request.
+
+            PR:     ${{ steps.cpr.outputs.pull-request-url }}
+            Branch: dataset-refresh/${{ github.run_id }}
+            Run:    ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Review the validation summary in the PR body, then merge it (or
+            close it if it has been superseded by a newer refresh). A refresh
+            PR left unmerged while main advances goes stale and must be closed,
+            not merged.
