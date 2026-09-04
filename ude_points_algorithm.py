@@ -148,16 +148,38 @@ def streak_adjustment(points, result, opponent_streak):
 #   * opponent quality
 #   * weight class
 #
-# A piecewise-linear age specification is selected empirically by BIC.  The
-# selected breakpoint and post-breakpoint slopes are then passed into the two
+# The age effect is modelled as a smooth logistic function of the fighter's
+# age *relative to a fixed anchor age* (AGE_ANCHOR_YEARS).  Model order --
+# no effect / linear / quadratic -- is chosen per calibration window by BIC,
+# computed on the honest sample size (number of fights, not the doubled
+# observation count).  The selected coefficients are passed into the two
 # scoring functions below.  This keeps statistical calibration separate from
 # the UDE scoring mechanism while ensuring the scoring mechanism never embeds
 # a manually chosen age threshold/slope.
+#
+# There is deliberately NO searched breakpoint.  The fight data cannot locate
+# one: the profiled log-likelihood is flat to within noise across the whole
+# 27-34 candidate range, so a free breakpoint just injects year-to-year
+# instability (selected "cliff age" swinging 26.5<->33.5 between calibration
+# windows that share 80% of their fights).  What the data *can* resolve is a
+# single age-gap slope, and its drift across eras.  See
+# age_calibration_validation.md.
 
 AGE_MIN_MULTIPLIER = 0.50
 AGE_MAX_MULTIPLIER = 1.50
 AGE_CALIBRATION_MIN_OBSERVATIONS = 1000
 AGE_CALIBRATION_RIDGE = 1e-6
+
+# Fixed "expected prime" age.  The age effect is measured as a deviation from
+# this anchor and only bites above it (a fighter at or below the anchor gets
+# no age adjustment, matching the previous reference_age gate).  Not fit: the
+# data does not identify a threshold, and freezing it removes the single
+# largest source of calibration-to-calibration noise in the old procedure.
+# 32 sits at the upper end of the defensible range (median fighter-fight age is
+# ~30.3; the old searched reference_age ranged 26.5-33.5) -- chosen so the
+# adjustment only engages once a fighter is clearly past prime, not merely at
+# the population median.  See age_calibration_validation.md.
+AGE_ANCHOR_YEARS = 32.0
 
 
 def _age_calibration_observations(df):
@@ -251,41 +273,47 @@ def _fit_logistic_irls(X, y, ridge=AGE_CALIBRATION_RIDGE,
     return beta, log_likelihood
 
 
-def _age_design_matrix(observations, breakpoint):
-    """Create the piecewise-linear age/OQ/weight-class design matrix."""
-    own_linear = observations['own_age'].to_numpy() - breakpoint
-    own_post = np.maximum(own_linear, 0.0)
-    opponent_linear = observations['opponent_age'].to_numpy() - breakpoint
-    opponent_post = np.maximum(opponent_linear, 0.0)
+_AGE_MODEL_ORDERS = ('flat', 'linear', 'quadratic')
+
+
+def _age_design_matrix(observations, order):
+    """Symmetric age design matrix for the given model `order`.
+
+    Own age and opponent age enter only as the mirrored differences
+    ``d_own - d_opp`` (and its square), where ``d = age - AGE_ANCHOR_YEARS``.
+    This makes the fitted age effect exactly antisymmetric between the two
+    fighters -- a fighter-level model -- rather than fitting a separate own
+    and opponent slope that are then hoped to mirror.
+
+    Weight-class dummies are intentionally omitted.  The two-observations-
+    per-fight construction (_age_calibration_observations) enters one win and
+    its mirrored loss in the *same* weight class for every fight, which forces
+    every weight-class coefficient to ~0; they would only pad the parameter
+    count and inflate BIC.
+
+    Column order: intercept, [age-gap linear], [age-gap quadratic], opp-quality.
+    """
+    d_own = observations['own_age'].to_numpy() - AGE_ANCHOR_YEARS
+    d_opp = observations['opponent_age'].to_numpy() - AGE_ANCHOR_YEARS
     quality = observations['opponent_quality'].to_numpy()
 
-    weights = pd.get_dummies(
-        observations['weight_class'].astype(str),
-        drop_first=True,
-        dtype=float,
-    )
-
-    numeric = np.column_stack([
-        np.ones(len(observations)),
-        own_linear,
-        own_post,
-        opponent_linear,
-        opponent_post,
-        quality - observations['opponent_quality'].mean(),
-    ])
-
-    if len(weights.columns):
-        return np.column_stack([numeric, weights.to_numpy(dtype=float)])
-    return numeric
+    cols = [np.ones(len(observations))]
+    if order in ('linear', 'quadratic'):
+        cols.append(d_own - d_opp)
+    if order == 'quadratic':
+        cols.append(d_own ** 2 - d_opp ** 2)
+    cols.append(quality - observations['opponent_quality'].mean())
+    return np.column_stack(cols)
 
 
-def _fit_age_model(observations, breakpoint):
-    X = _age_design_matrix(observations, breakpoint)
+def _fit_age_model(observations, order):
+    X = _age_design_matrix(observations, order)
     y = observations['win'].to_numpy(dtype=float)
     beta, log_likelihood = _fit_logistic_irls(X, y)
-    n = len(y)
-    n_parameters = len(beta)
-    bic = -2.0 * log_likelihood + n_parameters * np.log(n)
+    # Honest sample size: the two rows per fight are one win and its mirrored
+    # loss, deterministically linked, not two independent Bernoulli trials.
+    n_fights = max(1, len(y) // 2)
+    bic = -2.0 * log_likelihood + len(beta) * np.log(n_fights)
     return beta, bic
 
 
@@ -293,10 +321,14 @@ def calibrate_age_effects(df):
     """
     Empirically derive the age parameters used by UDE's age adjustments.
 
-    The breakpoint is selected by BIC over a data-derived candidate range
-    (the middle 60% of observed fighter ages, evaluated in 0.5-year steps).
-    The two slopes before the breakpoint and the two incremental post-break
-    slopes are estimated jointly with opponent quality and weight class.
+    Fits win probability as a logistic function of the fighter's age relative
+    to AGE_ANCHOR_YEARS, controlling for opponent quality.  Model order --
+    ``flat`` (no age effect), ``linear`` (constant per-year slope) or
+    ``quadratic`` (decline accelerating with age) -- is chosen by BIC on the
+    fight count.  A quadratic term is only kept when it is concave
+    (age_gap_curvature < 0, i.e. the decline sharpens with age); a
+    non-concave quadratic is not a shape worth extrapolating and the window
+    falls back to its best lower-order fit.
 
     Returns a plain dict so it can be passed explicitly into the scoring
     functions and easily logged/tested/serialized.
@@ -308,43 +340,54 @@ def calibrate_age_effects(df):
             f'{len(observations)} < {AGE_CALIBRATION_MIN_OBSERVATIONS}'
         )
 
-    ages = pd.concat([
-        observations['own_age'],
-        observations['opponent_age'],
-    ], ignore_index=True)
-    lower = float(ages.quantile(0.20))
-    upper = float(ages.quantile(0.80))
-    candidates = np.arange(
-        np.floor(lower * 2.0) / 2.0,
-        np.ceil(upper * 2.0) / 2.0 + 0.001,
-        0.5,
-    )
+    fits = {}
+    for order in _AGE_MODEL_ORDERS:
+        beta, bic = _fit_age_model(observations, order)
+        fits[order] = {'beta': beta, 'bic': bic}
 
-    fitted = []
-    for breakpoint in candidates:
-        beta, bic = _fit_age_model(observations, float(breakpoint))
-        fitted.append((bic, float(breakpoint), beta))
+    order = min(_AGE_MODEL_ORDERS, key=lambda o: fits[o]['bic'])
+    beta = fits[order]['beta']
 
-    _, breakpoint, beta = min(fitted, key=lambda item: item[0])
+    age_gap_linear = float(beta[1]) if order in ('linear', 'quadratic') else 0.0
+    age_gap_curvature = float(beta[2]) if order == 'quadratic' else 0.0
 
-    # Matrix order is fixed by _age_design_matrix:
-    # intercept, own_linear, own_post, opponent_linear, opponent_post, quality, ...
-    own_pre_slope = float(beta[1])
-    own_post_increment = float(beta[2])
-    opponent_pre_slope = float(beta[3])
-    opponent_post_increment = float(beta[4])
+    # Only extrapolate curvature that sharpens the decline. A positive
+    # curvature term (decline flattening or reversing at older ages) would
+    # push the age offset back toward zero -- or positive -- for the oldest
+    # fighters, which is not a shape this calibration should project.
+    if order == 'quadratic' and age_gap_curvature >= 0.0:
+        order = 'linear' if fits['linear']['bic'] <= fits['flat']['bic'] else 'flat'
+        beta = fits[order]['beta']
+        age_gap_linear = float(beta[1]) if order == 'linear' else 0.0
+        age_gap_curvature = 0.0
 
     return {
-        'reference_age': breakpoint,
-        'own_pre_slope': own_pre_slope,
-        'own_post_slope': own_pre_slope + own_post_increment,
-        'opponent_pre_slope': opponent_pre_slope,
-        'opponent_post_slope': opponent_pre_slope + opponent_post_increment,
-        'own_post_increment': own_post_increment,
-        'opponent_post_increment': opponent_post_increment,
+        'calibration_method': f'{order}_logistic_bic',
+        'model_order': order,
+        'anchor_age': AGE_ANCHOR_YEARS,
+        'age_gap_linear': age_gap_linear,
+        'age_gap_curvature': age_gap_curvature,
+        'opponent_quality_slope': float(beta[-1]),
         'n_observations': int(len(observations)),
-        'calibration_method': 'piecewise_logistic_bic',
+        'n_fights': int(len(observations) // 2),
+        'bic_by_order': {o: float(fits[o]['bic']) for o in _AGE_MODEL_ORDERS},
     }
+
+
+def _age_logit_offset(age, calibration):
+    """Signed effect of `age` on this person's win-logit, relative to the
+    anchor age. <= 0 (older than anchor lowers win probability); exactly 0
+    at or below the anchor, or under neutral calibration."""
+    anchor = calibration.get('anchor_age', np.nan)
+    if pd.isna(anchor) or pd.isna(age) or float(age) <= anchor:
+        return 0.0
+    d = float(age) - anchor
+    offset = calibration['age_gap_linear'] * d + calibration['age_gap_curvature'] * d * d
+    # The age penalty only ever lowers win probability. With the calibration's
+    # sign constraints (linear < 0, curvature <= 0 and concave-only) offset is
+    # already monotone non-increasing for age > anchor; the clamp is a cheap
+    # guard so a degenerate fit can never produce an age *bonus* here.
+    return float(min(offset, 0.0))
 
 
 def _age_multiplier(age, calibration, side, result):
@@ -352,35 +395,29 @@ def _age_multiplier(age, calibration, side, result):
     if result not in {'W', 'L'} or pd.isna(age):
         return 1.0
 
-    reference_age = calibration['reference_age']
-    # calibration['reference_age'] is NaN under neutral calibration (see
-    # _neutral_age_calibration) -- comparisons against NaN are always False,
-    # so `age <= reference_age` would silently fail to short-circuit and let
-    # slope * NaN propagate into the multiplier. Must return early explicitly.
-    if pd.isna(reference_age):
+    # offset <= 0 is the calibrated hit to this person's win-logit from being
+    # older than the anchor age. It is exactly 0.0 at/below the anchor and
+    # under neutral calibration (anchor_age = NaN) -- _age_logit_offset guards
+    # the NaN explicitly, because NaN comparisons never short-circuit and the
+    # NaN would otherwise propagate through exp() and resolve to a spurious
+    # clamp bound (see project_history.md #11).
+    offset = _age_logit_offset(age, calibration)
+    if offset == 0.0:
         return 1.0
-    if age <= reference_age:
-        return 1.0
-
-    slope = calibration[f'{side}_post_slope']
-    years_after_reference = float(age) - reference_age
 
     if side == 'opponent':
-        # Opposition-quality discount: signed, so a declining opponent is
-        # worth less to beat and a worse loss to fall to -- whichever
-        # direction the calibration actually finds for opponent_post_slope.
-        effect = np.exp(slope * years_after_reference)
+        # Opposition-quality discount: an opponent past their prime is worth
+        # less to beat and a worse loss to fall to.
+        effect = np.exp(-offset)  # offset < 0  ->  effect > 1
         multiplier = 1.0 / effect if result == 'W' else effect
         return float(max(AGE_MIN_MULTIPLIER, min(AGE_MAX_MULTIPLIER, multiplier)))
 
     # Own side: an achievement-under-adversity reward, not an
-    # opposition-quality discount, so magnitude (not sign) scales the bonus --
-    # every other UDE component (higher_rated_opponent_bonus,
+    # opposition-quality discount, so the magnitude of the age hit scales the
+    # bonus -- every other UDE component (higher_rated_opponent_bonus,
     # opponent_quality_adjustment) already rewards clearing a harder bar with
-    # more credit, never less. The signed own_post_slope is negative
-    # (own-age win probability declines past the breakpoint); using it
-    # directly would shrink this bonus instead of rewarding it.
-    effect = np.exp(abs(slope) * years_after_reference)
+    # more credit, never less.
+    effect = np.exp(abs(offset))
     multiplier = effect if result == 'W' else 1.0
     return float(max(AGE_MIN_MULTIPLIER, min(AGE_MAX_MULTIPLIER, multiplier)))
 
@@ -392,24 +429,24 @@ def age_adjustment(points, result, opponent_age, weight_class, calibration):
 
 OWN_AGE_GATE_WIDTH_YEARS = 3.0
 
-def _own_age_gate_scale(opponent_age, reference_age, width=OWN_AGE_GATE_WIDTH_YEARS):
+def _own_age_gate_scale(opponent_age, anchor_age, width=OWN_AGE_GATE_WIDTH_YEARS):
     """
-    Smooth replacement for a hard opponent_age > reference_age cutoff: 1.0
-    well below reference_age (full credit), 0.5 exactly at reference_age,
+    Smooth replacement for a hard opponent_age > anchor_age cutoff: 1.0
+    well below anchor_age (full credit), 0.5 exactly at anchor_age,
     ->0.0 well above it (fully gated). Avoids a discontinuous jump in the
     fighter's own-age bonus from a marginal, sub-year change in opponent age.
     """
-    if pd.isna(opponent_age) or pd.isna(reference_age):
+    if pd.isna(opponent_age) or pd.isna(anchor_age):
         return 0.0
-    return float(1.0 / (1.0 + np.exp((float(opponent_age) - float(reference_age)) / width)))
+    return float(1.0 / (1.0 + np.exp((float(opponent_age) - float(anchor_age)) / width)))
 
 def own_age_adjustment(points, result, fighter_age, opponent_age, weight_class, calibration):
     # Gated by opponent age so a fighter isn't rewarded for beating another
     # fighter who is also past their prime -- gate_scale (see
     # _own_age_gate_scale) scales continuously rather than gating on/off.
     if result == 'W':
-        reference_age = calibration['reference_age']
-        gate_scale = _own_age_gate_scale(opponent_age, reference_age)
+        anchor_age = calibration.get('anchor_age', np.nan)
+        gate_scale = _own_age_gate_scale(opponent_age, anchor_age)
         raw_multiplier = _age_multiplier(fighter_age, calibration, 'own', result)
         multiplier = 1.0 + (raw_multiplier - 1.0) * gate_scale
         return round(points * multiplier, 2)
@@ -889,12 +926,14 @@ def get_performance_scaling_factor(result, method_mapped, pdi_margin, dominant_f
 
 def _neutral_age_calibration(reason='insufficient_prior_history'):
     return {
-        'reference_age': np.nan,
-        'own_pre_slope': 0.0, 'own_post_slope': 0.0,
-        'opponent_pre_slope': 0.0, 'opponent_post_slope': 0.0,
-        'own_post_increment': 0.0, 'opponent_post_increment': 0.0,
-        'n_observations': 0,
         'calibration_method': 'temporal_expanding_neutral',
+        'model_order': 'flat',
+        'anchor_age': np.nan,
+        'age_gap_linear': 0.0,
+        'age_gap_curvature': 0.0,
+        'opponent_quality_slope': 0.0,
+        'n_observations': 0,
+        'n_fights': 0,
         'calibration_reason': reason,
     }
 
