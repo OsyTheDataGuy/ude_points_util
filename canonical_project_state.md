@@ -2,7 +2,7 @@
 
 **Baseline date: 21 August 2026 — v2.6 locked as production.** The scoring engine (`ude_points_algorithm.py`, `ude_points_feature_engineering_pipeline.py`) is unchanged since this lock; `ude_points_utils.py` and `dataset_processing_pipeline.py` have grown since (§4, §7) without touching scoring.
 
-This document is intended to be the **authoritative compact context** for continuing the UDE Points project. It reflects the current state — architecture, decisions in force, and known tradeoffs — not a history of how it was reached. For the "how we got here," see `project_history.md`.
+This document is the **authoritative compact context** for continuing the UDE Points project — architecture, decisions in force, known tradeoffs. It holds current state only, not a history of how it was reached. For data-integrity corrections and load-bearing invariants that aren't obvious from the code, see `data_integrity_and_invariants.md`.
 
 Be certain to keep your responses succinct and efficient.
 
@@ -34,16 +34,16 @@ Per fighter-side, per fight, in order: `raw_base_points` (±3 W/L) → `champion
 **Age adjustment — two different sign conventions by design, not oversight:**
 - `opponent` side (`age_adjustment`): signed slope — an opposition-quality discount. A declining opponent is objectively worth less to beat, worse to lose to, in whichever direction the calibration finds.
 - `own` side (`own_age_adjustment`): `abs(slope)` — an achievement-under-adversity reward. Every other UDE component (`higher_rated_opponent_bonus`, `opponent_quality_adjustment`) already rewards clearing a harder bar with *more* credit, never less; own-age matches that convention rather than penalizing a lower a-priori win probability.
-- The own-age bonus is gated by opponent age via `_own_age_gate_scale`, a sigmoid (not a hard cutoff) centered on `reference_age`, 3-year width: full credit well below reference, ~0 well above.
-- Both `_age_multiplier` code paths explicitly guard `pd.isna(reference_age)` (the "neutral calibration" state for years with insufficient prior history) and return a true 1.0x no-op — this guard is load-bearing, not decorative; see `project_history.md` #11 for what happens without it.
+- The own-age bonus is gated by opponent age via `_own_age_gate_scale`, a sigmoid (not a hard cutoff) centered on `anchor_age` (fixed at `AGE_ANCHOR_YEARS` = 32.0 — the data identifies no threshold; 32 sits at the top of the defensible range so the adjustment engages only past prime, not at the ~30.3 median fighter age; see `age_calibration_validation.md`), 3-year width: full credit well below the anchor, ~0 well above.
+- `_age_logit_offset` explicitly guards `pd.isna(anchor_age)` (the "neutral calibration" state for years with insufficient prior history) before any arithmetic and returns 0.0, so `_age_multiplier` is a true 1.0x no-op — this guard is load-bearing, not decorative; see `data_integrity_and_invariants.md` for what happens without it.
 
-**Calibration:** age-decline curve (piecewise-logistic, BIC-selected breakpoint) and method×PDI residual (binomial GLM, forward 5-fight win rate) are each fit per calendar year on a trailing 5-year window (`CALIBRATION_ROLLING_WINDOW_YEARS`), falling back to full expanding history only below `CALIBRATION_MIN_FIGHT_OBSERVATIONS` (1,000) fights — keeps calibration reflective of the contemporary era. Strictly temporal: no fit uses data on/after its own cutoff. Fallback engages 1999–2011 in the current dataset; rolling window active 2012 onward.
+**Calibration:** the age-decline curve is a fixed-anchor smooth logistic model (age effect measured as deviation from `AGE_ANCHOR_YEARS`, biting only above it), model order — `flat` / `linear` / `quadratic` — chosen per window by BIC on the fight count. There is no searched breakpoint: the fight data does not identify one (see `age_calibration_validation.md`). Every rolling window from 2008 selects `linear`. The method×PDI residual (binomial GLM, forward 5-fight win rate) is fit the same way. Both are fit per calendar year on a trailing 5-year window (`CALIBRATION_ROLLING_WINDOW_YEARS`), falling back to full expanding history only below `CALIBRATION_MIN_FIGHT_OBSERVATIONS` (1,000) fights — keeps calibration reflective of the contemporary era. Strictly temporal: no fit uses data on/after its own cutoff. Fallback engages 1999–2011 in the current dataset; rolling window active 2012 onward.
 
 **Diagnostics persisted per fight** (`<metric>_fighter_1`/`_fighter_2` columns): `method_pdi_residual`, `performance_scaling_factor`, `higher_rated_opponent_bonus`, `opponent_quality_adjustment`, `title_defense_bonus`, `streak_bonus`, `age_adjustment`, `own_age_adjustment`, `rematch_adjustment`, `absolute_swing_cap_triggered`, `quality_score`, `quality_multiplier`. Every bonus component's marginal contribution is independently auditable from the output CSV without re-running with ablation. `df.attrs` also carries `absolute_swing_cap_bind_count`/`_total_observations`/`_bind_rate` — currently 0/16,904 (0%), the cap is dormant, not load-bearing.
 
 ### Accepted tradeoffs (current decisions, not open questions)
 - **PDI signal reuse across `dominance_adjustment` and `perf_scale`:** both derive from the identical `pdi_margin / PDI_MARGIN_SCALE`, so they move in the same direction on every fight. Accepted because `perf_scale` is shrink-only (0.20–1.0) and structurally cannot generate points on its own — it dampens other components, it doesn't duplicate `dominance_adjustment`'s output. No unclaimed orthogonal signal exists elsewhere in the architecture for `perf_scale` to use instead without creating a new collision (method → residual, opponent record → OQ adjustment, rating gap → upset bonus are all already owned).
-- **Rolling/expanding calibration boundary (2011→2012):** the regime switch could in principle produce a calibration jump unrelated to any real change in the sport. Measured and found statistically indistinguishable from ordinary year-to-year BIC refit noise elsewhere in the series — left unaddressed.
+- **Rolling/expanding calibration boundary (2011→2012):** the regime switch could in principle produce a calibration jump unrelated to any real change in the sport. On the method×PDI side it was measured and found statistically indistinguishable from ordinary year-to-year refit noise. On the new `age_gap_linear` series the 2011→2012 step (−0.046 → −0.060) is the largest single adjacent move, ~2× the typical year-to-year delta — modest in absolute terms and within the era-trend direction, left unaddressed but worth knowing.
 - **Smoothing constants** (`OWN_AGE_GATE_WIDTH_YEARS=3.0`, `HIGHER_RATED_GAP_SCALE=30.0`, `HIGHER_RATED_GAP_FLOOR=15.0`, `TITLE_DEFENSE_CAP`/`DECAY`) are hand-tuned, not empirically fit — consistent across the codebase, not a gap specific to any one component.
 
 ---
@@ -54,28 +54,28 @@ Per fighter-side, per fight, in order: `raw_base_points` (±3 W/L) → `champion
 
 | Rank | Fighter | Record | Fights | Career Gain | Shrunk Rate |
 |---|---|---|---|---|---|
-| 1 | Georges St-Pierre | 20-2-0 | 22 | 154.7 | 4.429 |
-| 2 | Jon Jones | 22-1-0 | 24 | 158.0 | 4.265 |
-| 3 | Islam Makhachev | 18-1-0 | 19 | 110.9 | 3.376 |
-| 4 | Demetrious Johnson | 15-2-1 | 18 | 89.0 | 2.714 |
-| 5 | Amanda Nunes | 16-2-0 | 18 | 82.9 | 2.497 |
-| 6 | Valentina Shevchenko | 15-3-1 | 19 | 81.3 | 2.353 |
-| 7 | Khabib Nurmagomedov | 13-0-0 | 13 | 67.0 | 2.345 |
-| 8 | Alexander Volkanovski | 15-3-0 | 18 | 76.0 | 2.249 |
-| 9 | Justin Gaethje | 11-5-0 | 16 | 57.1 | 1.695 |
-| 10 | Merab Dvalishvili | 14-3-0 | 17 | 56.5 | 1.608 |
-| 11 | Dricus Du Plessis | 10-1-0 | 11 | 44.5 | 1.498 |
-| 12 | Daniel Cormier | 11-3-0 | 15 | 50.0 | 1.479 |
-| 13 | Ilia Topuria | 9-1-0 | 10 | 42.6 | 1.476 |
-| 14 | Francis Ngannou | 12-2-0 | 14 | 46.4 | 1.392 |
-| 15 | Alex Pereira | 10-3-0 | 13 | 44.0 | 1.347 |
-| 16 | Alexandre Pantoja | 14-4-0 | 18 | 49.5 | 1.302 |
-| 17 | Movsar Evloev | 10-0-0 | 10 | 38.9 | 1.292 |
-| 18 | Aljamain Sterling | 18-5-0 | 23 | 54.0 | 1.240 |
-| 19 | Benson Henderson | 11-3-0 | 14 | 42.6 | 1.234 |
-| 20 | Petr Yan | 12-4-0 | 16 | 44.7 | 1.216 |
+| 1 | Jon Jones | 22-1-0 | 24 | 160.4 | 4.377 |
+| 2 | Georges St-Pierre | 20-2-0 | 22 | 151.2 | 4.363 |
+| 3 | Islam Makhachev | 18-1-0 | 19 | 118.0 | 3.670 |
+| 4 | Demetrious Johnson | 15-2-1 | 18 | 94.7 | 2.969 |
+| 5 | Amanda Nunes | 16-2-0 | 18 | 91.4 | 2.853 |
+| 6 | Valentina Shevchenko | 15-3-1 | 19 | 87.8 | 2.628 |
+| 7 | Khabib Nurmagomedov | 13-0-0 | 13 | 69.5 | 2.519 |
+| 8 | Alexander Volkanovski | 15-3-0 | 18 | 80.2 | 2.451 |
+| 9 | Merab Dvalishvili | 14-3-0 | 17 | 63.8 | 1.937 |
+| 10 | Alex Pereira | 10-3-0 | 13 | 55.2 | 1.899 |
+| 11 | Ilia Topuria | 9-1-0 | 10 | 48.5 | 1.848 |
+| 12 | Dricus Du Plessis | 10-1-0 | 11 | 49.5 | 1.809 |
+| 13 | Daniel Cormier | 11-3-0 | 15 | 55.9 | 1.774 |
+| 14 | Francis Ngannou | 12-2-0 | 14 | 51.4 | 1.659 |
+| 15 | Justin Gaethje | 11-5-0 | 16 | 53.3 | 1.607 |
+| 16 | Kamaru Usman | 16-4-0 | 20 | 56.7 | 1.505 |
+| 17 | Khamzat Chimaev | 9-1-0 | 10 | 40.8 | 1.465 |
+| 18 | Movsar Evloev | 10-0-0 | 10 | 40.8 | 1.462 |
+| 19 | Benson Henderson | 11-3-0 | 14 | 45.8 | 1.428 |
+| 20 | Alexandre Pantoja | 14-4-0 | 18 | 50.8 | 1.401 |
 
-623 fighters clear the `n_fights >= 10` floor. Topuria, Evloev, Dricus Du Plessis, and Alex Pereira sit closest to it (10–13 fights). Top-20 membership and order are unchanged from the prior snapshot — the sub-0.002 shifts in Shrunk Rate are recalibration drift from the `project_history.md` #52 opponent-scramble correction (26 rebuilt rows across UFC 19–23 and the 2023-08-26 card), nudging `population_mean_rate` and the rolling method/age calibration curves; none of these 20 fighters had a fight of their own materially rescored. That same correction reordered two virtually-tied pairs *outside* this table: heavyweight #3/#4 (Miocic ↔ Aspinall) and bantamweight #1/#2 (Dillashaw ↔ Dvalishvili) in `rank_fighters_by_shrunk_ude_rate_by_weight_class`, each a sub-0.003 `shrunk_rate` gap.
+623 fighters clear the `n_fights >= 10` floor. Topuria, Chimaev, and Evloev sit right at it (10 fights); Du Plessis (11) and Pereira (13) aren't far behind. Jones's #1 spot, and Gaethje's fall out of the top 10, both trace to `is_champion_fighter_1`/`_2` and `title_defenses_fighter_1`/`_2` correctly distinguishing an interim title reign from an undisputed one (`create_is_title_bout_column` previously coded every interim title bout identically to an undisputed one, so `update_title_defenses` and every scoring component keyed on champion/defense status treated the two as equivalent). Kamaru Usman and Khamzat Chimaev are new entrants to the top 20; Aljamain Sterling and Petr Yan are the two fighters this pushed out.
 
 ---
 
@@ -132,7 +132,7 @@ None is blended into the others; each answers a different question:
 - **`calculate_striking_power`** ("who hits hardest") — NOT win-conditioned: `kd / head_strikes_landed` per fighter/weight-class, same shrinkage machinery and injury filter. A knockdown the opponent survives counts exactly as much as one that ends the fight.
 - **`calculate_durability_adjusted_power`** — `calculate_striking_power`, reweighted per-fight by `add_opponent_durability_multiplier`: a bounded `[0.5, 2.0]` multiplier from the OPPONENT's own pre-fight standing-KO/TKO-loss rate, shrunk toward *that fight's own weight class* baseline (not one dataset-wide number — this rate spans 8.4x across divisions, HW to WSW). Neither `calculate_striking_power` nor `calculate_overall_potency` incorporates this adjustment; only `calculate_durability_adjusted_power` does.
 - Shared helper: `_shrink_rate(count, total, prior_strength, prior_rate)` — same shape as `ude_points_algorithm.shrunk_win_rate`, generalized to an arbitrary count/total pair. `RATE_SHRINKAGE_PRIOR_STRENGTH=5.0` (potency & power) and `DURABILITY_SHRINKAGE_PRIOR_STRENGTH=15.0` are both sensitivity-checked: potency's top-10 rankings hold 7–10/10 stable across a 1→30 sweep, power's hold 9–10/10 (sturdier because its floor, `min_head_strikes_landed`, gates directly on the ratio's own denominator rather than a looser fight-count proxy).
-- **Known limitation, not a bug:** `add_opponent_durability_multiplier`'s bound binds for ~63% of fighter-fight observations even with correct division-scoping — a structural consequence of shrinking a right-skewed, rare-event rate toward its mean (a majority of any population legitimately sits below the mean for a rare event), not a miscalibration. Left as-is; revisit only if a specific downstream use needs finer discrimination among highly-durable opponents specifically (see `project_history.md` for the fuller mean-vs-median tradeoff discussion).
+- **Known limitation, not a bug:** `add_opponent_durability_multiplier`'s bound binds for ~63% of fighter-fight observations even with correct division-scoping — a structural consequence of shrinking a right-skewed, rare-event rate toward its mean (a majority of any population legitimately sits below the mean for a rare event), not a miscalibration. Left as-is; revisit only if a specific downstream use needs finer discrimination among highly-durable opponents specifically. Mean-based shrinkage was chosen deliberately — there is no clean Bayesian formulation for median-based shrinkage, and mixing the two philosophies in one file wasn't worth an unclear benefit.
 
 ### 4d. Rematch history
 `process_rematch_data(df, exclude_no_contests=False)` (+ `find_same_winner_rematches`) — every fighter-pair rematch, whether each meeting was immediate (no intervening fight for either side since their last meeting), and the winner. `assign_winner` returns distinct `'draw'`/`'no_contest'` sentinels rather than a collapsed `None`, so two draws between the same pair can't spuriously register as a repeat win. `filter_invalid_rematches` reuses `ude_points_algorithm.is_no_score_fight` (checks both `fight_result == 'NC'` and `method in {'DQ', 'Overturned'}`) instead of a narrower method-string-only check.
@@ -159,7 +159,7 @@ None is blended into the others; each answers a different question:
 What's available: fight stats (PDI, significant strikes, etc.) have 0% missing data back to 1999, so there's no raw-coverage blocker. 34.4% of all fighters (874 of 2,544) have fought in 2+ weight classes — enough cross-division bridges to plausibly identify relative division/era strength via a paired-comparison model (Bradley-Terry-style), the same way this project already fits age and method effects, rather than a circular "average the division's own UDE ratings" shortcut (which would just feed the ranking back into itself).
 
 What's genuinely hard:
-- **Identification is real modeling work.** A new calibration function is needed — analogous to `calibrate_age_effects` — that estimates weight-class × era strength offsets from the bridge-fighter network, with the same strict-temporal, no-future-leakage discipline already enforced elsewhere, and an explicit NaN-safe fallback for under-connected cells (the exact class of bug already found and fixed once in `_age_multiplier`, see `project_history.md` #11, must be designed against from the start here).
+- **Identification is real modeling work.** A new calibration function is needed — analogous to `calibrate_age_effects` — that estimates weight-class × era strength offsets from the bridge-fighter network, with the same strict-temporal, no-future-leakage discipline already enforced elsewhere, and an explicit NaN-safe fallback for under-connected cells (the exact bug class already found and fixed once in `_age_multiplier` — see `data_integrity_and_invariants.md` — must be designed against from the start here).
 - **Some cells have no data by construction, not by gap.** Featherweight and bantamweight didn't exist in the UFC before ~2011 (0 unique fighters in 2001–2003 in this dataset, 129–140 by 2022–2024) — there's no "true" era-strength value to estimate for a division that didn't exist yet, only a defined "not applicable" state.
 - **Measurement validity, not just volume.** Rules, judging criteria, and round/format standards changed materially over 1999–2026; a "dominant" PDI performance under one era's judging isn't necessarily comparable to another's, and no amount of additional fight-count data fixes that — it's a property of the sport's history, not an engineering gap.
 - **No ground truth.** There's no objective answer to "was 2003 heavyweight weaker than 2024 lightweight," so any model needs face-validity checks against combat-sports historical consensus before being trusted, not just a clean fit statistic.
@@ -172,13 +172,13 @@ Net: buildable, and the data supports a first version — but it's a v3-scale pr
 
 **What's usually shared alongside this document:** `dataset_processing_pipeline.py`, `ude_points_feature_engineering_pipeline.py`, `ude_points_algorithm.py`, and `current_df.csv`. These four are documented in full below. Everything else exists only in the project's GitHub repo (`OsyTheDataGuy/ude_points_util`) and is listed in one line each at the end of this section — detailed elsewhere in this document (§4, §8), not repeated here.
 
-**Folder layout:** the main folder holds the active pipeline files (below) plus `current_df.csv` and `fighters_df.csv`, both live files kept current by the automated pipeline (§8). No other dataset snapshots or notebooks remain locally — earlier superseded snapshots (`v2_6.csv`, `v2_6_with_phase_profiles.csv`, the raw ETL-stage `..._ready_for_features.csv`, the old `v2_5.csv`) have been deleted, not archived; `project_history.md` is the record of what they contained.
+**Folder layout:** the main folder holds the active pipeline files (below) plus `current_df.csv` and `fighters_df.csv`, both live files kept current by the automated pipeline (§8). No other dataset snapshots or notebooks remain locally — earlier superseded snapshots (`v2_6.csv`, `v2_6_with_phase_profiles.csv`, the raw ETL-stage `..._ready_for_features.csv`, the old `v2_5.csv`) have been deleted, not archived — `current_df.csv` is rebuilt end-to-end from raw columns on every regeneration (§3), so no intermediate snapshot is authoritative.
 
 **Pipeline order:** `fighter_scrape_new.py` + `ude_scrape_new.py` (acquisition, incremental) → `dataset_processing_pipeline.py` (raw scrape → 1-row-per-fight) → `ude_points_feature_engineering_pipeline.py` (→ PDI/chronological features) → `ude_points_algorithm.py` (→ UDE points) → `ude_points_utils.py` (→ rankings/career views). `run_refresh.py` orchestrates the ETL-through-scoring half of this chain as one call (§8); the two scrapers run as separate steps before it.
 
 * ```text dataset_processing_pipeline.py ``` — ETL: merges raw scraped fight/event/fighter-bio data into one row per fight (`run_etl_pipeline`). Drops and reports (does not silently discard) any row where `event_date` is null — `drop_rows_with_null_event_date`, called twice inside `run_etl_pipeline`: right after column standardization (catches a failed event-date join on the freshly-scraped data) and again right after the optional `current_dataset` merge (catches null/unparseable dates already sitting in the historical data being appended to — a fresh scrape's own check can't see those, since they enter the pipeline later). `ude_points_feature_engineering_pipeline.engineer_all_features` calls the same function again defensively at its own entry point, in case its input didn't come through this ETL step at all. `bio_cols` (step 6) carries `Height (m)`/`Weight (lbs)`/`Reach (in)`/`Stance` through from the raw fighter-bio scrape into the merged fight dataset. The final column-ordering step (step 12) appends any column not named in its `ordered_columns` list rather than dropping it, since by that point every column present was already deliberately constructed by an earlier step — the list's job is establishing a readable order, not deciding what belongs in the output. `convert_to_one_fight_one_row`'s `.nth(0)`/`.nth(1)` calls use `reset_index(drop=True)`, so no stray row-index column survives the pivot to one-row-per-fight. `validate_transformed_data` (called inside `run_etl_pipeline`, on the freshly-scraped batch before `current_dataset` is merged in) checks primary-key uniqueness, landed≤attempted, age/control-time bounds, join-leakage nulls, and — when `current_dataset` is passed in — that none of the batch's `fight_url`s already exist there. `validate_dataset_regeneration(old_df, new_df, key_col='fight_url', columns_expected_to_change=None)` is a separate function for a different pipeline stage: it diffs a prior fully-processed/scored dataset against a freshly regenerated one, raising on any lost key or any changed column not explicitly listed as expected to change.
 
-* ```text ude_points_feature_engineering_pipeline.py ``` — Generates chronological state and PDI fight-performance features. Scoring inputs (`pdi_margin` and everything derived from it) are unchanged since v2.6's lock. The file itself is not: `calculate_phase_magnitude_and_pdi` was edited post-lock to fix `decisive_wins`/`close_wins`/`ties` misclassification (project_history.md #33) by rounding a separate copy of the phase magnitudes before classification bucketing — verified to leave `pdi_margin` and every scored output bit-identical.
+* ```text ude_points_feature_engineering_pipeline.py ``` — Generates chronological state and PDI fight-performance features. Scoring inputs (`pdi_margin` and everything derived from it) are unchanged since v2.6's lock. The file itself is not: `calculate_phase_magnitude_and_pdi` was edited post-lock to fix `decisive_wins`/`close_wins`/`ties` misclassification (`data_integrity_and_invariants.md`) by rounding a separate copy of the phase magnitudes before classification bucketing — verified to leave `pdi_margin` and every scored output bit-identical.
 
 * ```text ude_points_algorithm.py ``` — Authoritative UDE scoring implementation. Unchanged since v2.6's lock.
 
@@ -189,7 +189,6 @@ Net: buildable, and the data supports a first version — but it's a v3-scale pr
 * `fighters_df.csv` — fighter bio source (Height/Weight/Reach/Stance/DOB) keyed by `URL`, 4,614 fighters as of the last refresh, kept current by the automated pipeline; carries a `bio_scrape_attempts` retry-cap column (§8).
 * `fighter_scrape_new.py`, `ude_scrape_new.py`, `run_refresh.py` — the automated acquisition/refresh scripts (§8).
 * `requirements.txt`, `.github/workflows/refresh_dataset.yml` — CI dependency list and the workflow definition (§8).
-* `project_history.md` — chronological record of how the current state was reached; not required reading to continue the project.
 
 ---
 

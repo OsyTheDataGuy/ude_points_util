@@ -18,9 +18,13 @@ def create_is_title_bout_column(df, weight_class_col='weight_class'):
     is_interim = s.str.contains('Interim')
     is_tournament = s.str.contains('Tournament')
 
-    # Evaluate conditions: must be a Title/Interim bout AND NOT a Tournament
-    is_tb = np.where(is_title & ~is_tournament, 2,
-            np.where(is_interim & ~is_tournament, 1, 0))
+    # Evaluate conditions: must be a Title/Interim bout AND NOT a Tournament.
+    # is_interim is checked first: an interim title string (e.g. "UFC Interim
+    # Lightweight Title Bout") also contains "Title Bout", so is_title alone
+    # can't distinguish it -- checking is_interim first is what makes the
+    # branches mutually exclusive.
+    is_tb = np.where(is_interim & ~is_tournament, 1,
+            np.where(is_title & ~is_tournament, 2, 0))
 
     new_cols = {'is_title_bout': is_tb}
     return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
@@ -128,16 +132,19 @@ def update_title_defenses(df):
         def_1.append(cur_def1)
         def_2.append(cur_def2)
 
+        # is_tb == 2 (not > 0): only an undisputed title bout counts as a
+        # defense of the undisputed belt -- an interim-title fight shouldn't
+        # increment or reset it.
         if champ1 > 0:
-            if r1 == 'W' and is_tb > 0:
+            if r1 == 'W' and is_tb == 2:
                 fighter_defenses[f1][wc] += 1
-            elif r1 == 'L' and is_tb > 0:
+            elif r1 == 'L' and is_tb == 2:
                 fighter_defenses[f1][wc] = 0
 
         if champ2 > 0:
-            if r2 == 'W' and is_tb > 0:
+            if r2 == 'W' and is_tb == 2:
                 fighter_defenses[f2][wc] += 1
-            elif r2 == 'L' and is_tb > 0:
+            elif r2 == 'L' and is_tb == 2:
                 fighter_defenses[f2][wc] = 0
 
     new_cols = {
