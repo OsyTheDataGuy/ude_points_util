@@ -1,0 +1,15 @@
+# OS/editor cruft
+.DS_Store
+__pycache__/
+*.pyc
+
+# Large one-off backup snapshots of current_df.csv -- not meant to be
+# version-controlled (git isn't built for tracking large data snapshots,
+# and current_df.csv itself is already the authoritative, git-tracked copy).
+# Every backup snapshot, current and future, belongs in backups/ -- nothing
+# under it should ever be committed.
+backups/
+
+# CLAUDE.md governs Claude sessions working in this local folder -- it stays
+# local forever, never pushed to the remote repo.
+CLAUDE.md
