@@ -34,7 +34,7 @@ name: Refresh UDE Points dataset
 on:
   workflow_dispatch: {}       # manual "Run workflow" button, for on-demand runs
   schedule:
-    - cron: '0 6 * * 1'       # every Monday 06:00 UTC -- adjust to taste,
+    - cron: '0 6 * * 2'       # every Tuesday 06:00 UTC -- adjust to taste,
                                # e.g. the morning after a typical fight night
 
 permissions:
