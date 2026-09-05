@@ -770,7 +770,7 @@ def rank_fighters_by_shrunk_ude_rate(df, prior_strength=10.0, min_fights=None):
     title run was inflating his FW-scoped ranking, and Jose Aldo's mixed BW
     stint was deflating his. Summing directly within `df` fixes this by
     construction: it can only reflect fights actually passed in. See
-    project_history.md #51.
+    canonical_project_state.md section 9b.
 
     Returns:
     - pd.DataFrame with columns: fighter, fighter_url, age, record, n_fights,
@@ -882,8 +882,8 @@ def rank_fighters_by_shrunk_ude_rate_by_weight_class(df, weight_class=None, star
     divisions does not bleed into their score here. Confirmed this mattered
     in practice, not just in theory: before this was fixed, Frankie Edgar's
     old LW title run was inflating his FW-scoped ranking, and Jose Aldo's
-    mixed BW stint was deflating his -- see project_history.md #51. What's
-    still NOT accounted for is competition strength -- a dominant run in a
+    mixed BW stint was deflating his -- see canonical_project_state.md
+    section 9b. What's still NOT accounted for is competition strength -- a dominant run in a
     shallow division-era scores the same as one in a stacked one -- see
     canonical_project_state.md section 6 for that separate, much larger,
     open problem.

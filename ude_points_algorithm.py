@@ -400,7 +400,7 @@ def _age_multiplier(age, calibration, side, result):
     # under neutral calibration (anchor_age = NaN) -- _age_logit_offset guards
     # the NaN explicitly, because NaN comparisons never short-circuit and the
     # NaN would otherwise propagate through exp() and resolve to a spurious
-    # clamp bound (see project_history.md #11).
+    # clamp bound (see canonical_project_state.md section 9b).
     offset = _age_logit_offset(age, calibration)
     if offset == 0.0:
         return 1.0
