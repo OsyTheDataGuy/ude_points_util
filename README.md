@@ -50,7 +50,7 @@ Full mechanics, current numbers, and known limitations are in [`canonical_projec
 | `requirements.txt` | Python dependencies |
 | `.github/workflows/refresh_dataset.yml` | The automated weekly refresh (below) |
 | `canonical_project_state.md` | Current architecture, scoring mechanics, and design decisions — start here |
-| `project_history.md` | Chronological log of how the project got here |
+| `data_integrity_and_invariants.md` | Data-integrity corrections and load-bearing invariants not obvious from the code |
 
 ## Automated weekly refresh
 
