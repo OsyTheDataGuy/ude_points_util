@@ -196,7 +196,7 @@ Net: buildable, and the data supports a first version — but it's a v3-scale pr
 
 The weekly refresh described in earlier sections (`fighter_scrape_new.py` → `ude_scrape_new.py` → ETL → scoring, previously run by hand) is now automated via GitHub Actions, in the project's repo (`OsyTheDataGuy/ude_points_util`). Live as of 31 August 2026.
 
-**Trigger:** `.github/workflows/refresh_dataset.yml` fires on the manual "Run workflow" button (`workflow_dispatch`) or automatically every Monday 06:00 UTC (`schedule`). The schedule only fires once this file is on the repo's default branch — a schedule defined on an unmerged branch/PR is never registered.
+**Trigger:** `.github/workflows/refresh_dataset.yml` fires on the manual "Run workflow" button (`workflow_dispatch`) or automatically every Tuesday 06:00 UTC (`schedule`). The schedule only fires once this file is on the repo's default branch — a schedule defined on an unmerged branch/PR is never registered.
 
 **Pipeline, in order:** fetch the latest `ufc_fighter_tott.csv`/`ufc_fight_details.csv`/`ufc_event_details.csv` from greco1899's GitHub → `ude_scrape_new.py` (incremental: only fights not already in `current_df.csv`) → `fighter_scrape_new.py` (incremental: only new fighters, fighters who just fought — the "active" trigger, since UFCStats' listed Weight tracks current division — or fighters with an incomplete bio profile still under their retry cap) → `run_refresh.py` (chains `run_etl_pipeline` → Stance backfill → `engineer_all_features` → `calculate_ude_points_with_ablation` → `add_ude_points_difference_columns` → `validate_dataset_regeneration`) → open a PR.
 
