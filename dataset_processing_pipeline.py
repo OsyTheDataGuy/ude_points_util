@@ -420,7 +420,8 @@ def validate_transformed_data(df: pd.DataFrame, max_null_pct: float = 0.05, verb
 
 
 def validate_dataset_regeneration(old_df: pd.DataFrame, new_df: pd.DataFrame, key_col: str = 'fight_url',
-                                   columns_expected_to_change: list = None, verbose: bool = True) -> dict:
+                                   columns_expected_to_change: list = None, verbose: bool = True,
+                                   numeric_tolerance: float = 0.0) -> dict:
     """
     Compares a prior fully-processed dataset against a freshly regenerated
     one, joined on `key_col`, and reports exactly what changed. Formalizes
@@ -450,12 +451,28 @@ def validate_dataset_regeneration(old_df: pd.DataFrame, new_df: pd.DataFrame, ke
     regardless of columns_expected_to_change, since a missing or duplicated
     fight is never an acceptable "expected change."
 
+    numeric_tolerance: absolute tolerance for NON-integer-valued numeric
+    columns (default 0.0 -> exact, the historical behaviour). The method-PDI
+    binomial GLM and the age IRLS fits are numerical optimisers: identical
+    inputs on a different BLAS / library point-release land a few 1e-3 apart,
+    which tips a handful of round(x, 2) scoring outputs across a boundary and
+    cascades ~0.05 into the career-total columns. With deps pinned and the
+    baseline regenerated in the same environment a refresh still diffs clean
+    at 0.0; a small tolerance (e.g. 0.01) absorbs residual cross-platform
+    noise without masking a real regression, which moves scoring values by
+    >=0.05 (a champion-status flip is exactly 0.05 in quality_score) up to
+    whole points. Integer-valued columns (raw stat counts, is_champion,
+    title_defenses, round_ended, ...) are always compared exactly regardless
+    of this setting -- a fractional change there is never noise.
+
     Returns a dict: {'new_keys': set, 'missing_keys': set,
     'changed_columns': {col: n_rows_differing}, 'unexpected_changes': bool}.
     """
     if verbose:
         print("\n" + "=" * 50)
         print(" DATASET REGENERATION DIFF")
+        if numeric_tolerance > 0:
+            print(f" (non-integer numeric columns compared at abs tolerance {numeric_tolerance:g})")
         print("=" * 50)
 
     columns_expected_to_change = set(columns_expected_to_change or [])
@@ -486,13 +503,21 @@ def validate_dataset_regeneration(old_df: pd.DataFrame, new_df: pd.DataFrame, ke
         both_null = a.isna() & b.isna()
         only_one_null = a.isna() ^ b.isna()
         if a.dtype.kind in 'biufc' and b.dtype.kind in 'biufc':
-            # (a - b) is NaN whenever either side is NaN, and NaN > 1e-9 is
-            # always False -- so a real regression where a numeric value
+            # (a - b) is NaN whenever either side is NaN, and NaN > threshold
+            # is always False -- so a real regression where a numeric value
             # silently becomes NaN (or vice versa) would otherwise never be
             # caught. only_one_null closes that gap explicitly. both_null
-            # needs no explicit handling here: NaN > 1e-9 already reads as
-            # "no difference" for it, correctly.
-            n_diff = int((((a - b).abs() > 1e-9) | only_one_null).sum())
+            # needs no explicit handling here: NaN > threshold already reads
+            # as "no difference" for it, correctly.
+            both_present = ~(a.isna() | b.isna())
+            av, bv = a[both_present], b[both_present]
+            is_integral = (
+                a.dtype.kind in 'bi' or b.dtype.kind in 'bi'
+                or bool((np.isclose(av % 1.0, 0.0) | np.isclose(av % 1.0, 1.0)).all()
+                        and (np.isclose(bv % 1.0, 0.0) | np.isclose(bv % 1.0, 1.0)).all())
+            )
+            threshold = 1e-9 if is_integral else max(numeric_tolerance, 1e-9)
+            n_diff = int((((a - b).abs() > threshold) | only_one_null).sum())
         else:
             # both_null must be excluded explicitly here: pandas represents
             # a missing value as NaN after a CSV round-trip but as Python
@@ -675,7 +700,11 @@ def run_etl_pipeline(
             curr_df = curr_df.drop(columns=list(cols_to_drop))
         final_df = pd.concat([curr_df, final_df], ignore_index=True)
 
-    # Ensure event_date is datetime and sort descending
+    # Ensure event_date is datetime and sort descending, fight_url as a
+    # deterministic tiebreaker for same-date rows (pandas' default sort is
+    # not stable) -- downstream feature engineering and scoring are
+    # chronological state machines, and this keeps their input order, hence
+    # current_df.csv, reproducible across runs.
     if 'event_date' in final_df.columns:
         final_df['event_date'] = pd.to_datetime(final_df['event_date'], errors='coerce')
         # Re-check for null event_date here too, not just on the freshly-scraped
@@ -686,7 +715,11 @@ def run_etl_pipeline(
         # could still contain null-date rows despite step 3b's check having
         # already run -- only appearing clean for freshly-scraped data.
         final_df = drop_rows_with_null_event_date(final_df)
-        final_df = final_df.sort_values(by='event_date', ascending=False).reset_index(drop=True)
+        sort_keys = ['event_date', 'fight_url'] if 'fight_url' in final_df.columns else ['event_date']
+        final_df = final_df.sort_values(
+            by=sort_keys,
+            ascending=[False] + [True] * (len(sort_keys) - 1),
+        ).reset_index(drop=True)
 
     return final_df
 
