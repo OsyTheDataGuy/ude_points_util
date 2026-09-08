@@ -115,7 +115,17 @@ jobs:
             --latest-events latest_events_df.csv \
             --previous-production-file current_df.csv \
             --output current_df.csv \
+            --numeric-tolerance 0.01 \
             | tee refresh_summary.txt
+          # --numeric-tolerance 0.01: the method-PDI GLM / age IRLS fits differ
+          # in the 3rd-4th decimal between this Linux runner's BLAS and whatever
+          # built the committed current_df.csv. requirements.txt pins the
+          # numerical stack so that gap is tiny; 0.01 covers the residual and
+          # the odd round(x,2) boundary flip. A real regression is >=0.05
+          # (a champion-status flip is 0.05 in quality_score) up to whole
+          # points, so it still fails loudly. If a clean refresh ever trips
+          # this, bump the value here and note why -- do not raise it silently.
+          #
           # run_refresh.py exits non-zero if validate_dataset_regeneration
           # raises (a lost fight, or an unexpected column change) -- that
           # failure stops the workflow here, before the PR step ever runs,

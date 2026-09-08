@@ -699,7 +699,10 @@ METHOD_RESIDUAL_REFERENCE = 'UD'
 
 def _build_future_performance_observations(df, min_future_fights=5, cutoff_date=None, cutoff_year=None, strict_cutoff=True):
     """Create one fighter-fight observation with a subsequent 5-fight record."""
-    d = df.sort_values('event_date').copy()
+    # fight_url tiebreaks same-date fights so the ordering is deterministic
+    # regardless of input row order (pandas' default sort is not stable) --
+    # required for current_df.csv to regenerate reproducibly.
+    d = df.sort_values(['event_date', 'fight_url']).copy()
     d['event_date'] = pd.to_datetime(d['event_date'])
     rows = []
     # chronological fight history per fighter URL
@@ -971,7 +974,7 @@ def _build_temporal_calibration_cache(df):
     rolling history exists), the window falls back to the full expanding
     history so the fit still has adequate statistical power.
     """
-    d = df.sort_values('event_date').copy()
+    d = df.sort_values(['event_date', 'fight_url']).copy()  # deterministic same-date order
     d['event_date'] = pd.to_datetime(d['event_date'])
     years = sorted(d['event_date'].dt.year.unique())
     cache = {}
@@ -1010,7 +1013,11 @@ def calculate_ude_points_with_ablation(df, ablate=None, opponent_quality_k=OQ_DE
     multi_division_fn = noop if 'multi_division' in ablate else multi_division_championship_bonus
     opponent_quality_fn = noop if 'opponent_quality' in ablate else opponent_quality_adjustment
 
-    df = df.sort_values(by='event_date').copy()
+    # fight_url tiebreaks same-date fights: pandas' default sort is not
+    # stable, so without it a fighter with two bouts on one card (e.g. a
+    # 1999 tournament night) would score in an input-order-dependent order
+    # and current_df.csv would not regenerate reproducibly.
+    df = df.sort_values(by=['event_date', 'fight_url']).copy()
     df['event_date'] = pd.to_datetime(df['event_date'])
 
     # UDE is a historical reconstruction: a fight at time T can only use
@@ -1232,7 +1239,7 @@ def calculate_ude_points_with_ablation(df, ablate=None, opponent_quality_k=OQ_DE
     df.attrs['absolute_swing_cap_total_observations'] = total_scored_fighter_fights
     df.attrs['absolute_swing_cap_bind_rate'] = bind_rate
 
-    return df.sort_values(by='event_date', ascending=False).reset_index(drop=True)
+    return df.sort_values(by=['event_date', 'fight_url'], ascending=[False, True]).reset_index(drop=True)
 
 
 def add_ude_points_difference_columns(df):

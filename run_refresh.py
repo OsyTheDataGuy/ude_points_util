@@ -49,7 +49,8 @@ def backfill_stance(raw_df: pd.DataFrame, fighters_df: pd.DataFrame) -> pd.DataF
 
 
 def run_refresh(current_dataset_csv, fighters_csv, latest_fights_csv, latest_events_csv,
-                 previous_production_csv, output_csv, columns_expected_to_change=None):
+                 previous_production_csv, output_csv, columns_expected_to_change=None,
+                 numeric_tolerance=0.0):
     print("Loading inputs...")
     current_dataset = pd.read_csv(current_dataset_csv, low_memory=False)
     fighters_df = pd.read_csv(fighters_csv, low_memory=False)
@@ -81,6 +82,7 @@ def run_refresh(current_dataset_csv, fighters_csv, latest_fights_csv, latest_eve
     result = validate_dataset_regeneration(
         previous_production_df, final,
         columns_expected_to_change=columns_expected_to_change,
+        numeric_tolerance=numeric_tolerance,
     )
 
     final.to_csv(output_csv, index=False)
@@ -105,6 +107,12 @@ def _parse_args():
                               "appended, no code changes) should never change any existing fight's own "
                               "columns. Only set this when a deliberate code fix is shipping alongside "
                               "this refresh, and only for the columns that fix is actually supposed to touch.")
+    parser.add_argument("--numeric-tolerance", type=float, default=0.0,
+                         help="Absolute tolerance for NON-integer numeric columns in the regeneration "
+                              "diff (default 0.0 = exact). The method-PDI GLM and age IRLS fits differ "
+                              "in the 3rd-4th decimal across BLAS/library builds; a small value (e.g. "
+                              "0.01) keeps that cross-platform noise from failing a clean refresh while "
+                              "still catching a real regression (>=0.05). Integer columns stay exact.")
     return parser.parse_args()
 
 
@@ -120,6 +128,7 @@ if __name__ == "__main__":
             previous_production_csv=args.previous_production_file,
             output_csv=args.output,
             columns_expected_to_change=allowed,
+            numeric_tolerance=args.numeric_tolerance,
         )
     except ValueError as e:
         print(str(e), file=sys.stderr)

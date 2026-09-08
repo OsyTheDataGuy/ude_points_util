@@ -982,7 +982,12 @@ def engineer_all_features(
         # valid, sortable date on every row.
         df = drop_rows_with_null_event_date(df)
 
-    df = df.sort_values(by='event_date', ascending=True).reset_index(drop=True)
+    # fight_url tiebreaks same-date fights so every chronological state
+    # machine below runs in a deterministic, input-order-independent order
+    # (pandas' default sort is not stable). Without it a fighter with two
+    # bouts on one card gets order-dependent records/streaks and
+    # current_df.csv stops regenerating reproducibly.
+    df = df.sort_values(by=['event_date', 'fight_url'], ascending=True).reset_index(drop=True)
 
     # Defensive NaN guard for the raw landed/attempted stat columns consumed
     # by update_career_means, add_dynamic_strike_accuracy/defence, and
