@@ -1,6 +1,18 @@
-pandas
-numpy
-statsmodels
-beautifulsoup4
+# Numerical stack pinned exactly. current_df.csv is regenerated from scratch and
+# diffed against the committed copy on every refresh (run_refresh.py ->
+# validate_dataset_regeneration). The method-PDI binomial GLM (statsmodels, via
+# scipy/numpy) and the age IRLS fits are numerical optimisers whose output moves
+# in the 3rd-4th decimal across library versions -- unpinned, CI drifts away from
+# the committed baseline every time any of these releases, and the refresh fails
+# validation before it can open a PR. Re-pin deliberately (and regenerate the
+# baseline) when bumping any of these.
+pandas==2.3.3
+numpy==2.3.5
+scipy==1.16.3
+statsmodels==0.14.5
+patsy==1.0.1
+
+# Scrape-only; do not affect scoring reproducibility.
+beautifulsoup4==4.13.5
+tqdm==4.67.1
 playwright
-tqdm
