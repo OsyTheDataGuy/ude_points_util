@@ -1014,7 +1014,15 @@ def create_fighter_status_dataset(df, as_of=None):
 
 '''9. Fighter finishing potency by weight class'''
 
-RATE_SHRINKAGE_PRIOR_STRENGTH = 5.0
+RATE_SHRINKAGE_PRIOR_STRENGTH = 5.0  # potency: units are WINS (ko_tko_wins / wins)
+# Power / durability-adjusted power divide a knockdown count by HEAD STRIKES
+# LANDED, not wins -- a prior of 5 there is 5 head strikes against a qualified
+# fighter's median of ~200, so it shrinks by ~1% and does nothing: the
+# unfiltered top of calculate_striking_power fills with 1-landed-strike
+# careers. 200 is ~1 division's worth of head-strike volume and is where
+# "never knocked down" starts to be real evidence rather than small-sample
+# noise. Re-derive if the head-strike scale of the data shifts materially.
+POWER_SHRINKAGE_PRIOR_STRENGTH = 200.0  # units: head strikes landed
 
 def _shrink_rate(count, total, prior_strength, prior_rate):
     """
@@ -1236,12 +1244,19 @@ def get_potency_by_weight_class(potency_ratings, weight_class, min_wins=5):
 
 '''10. Striking power ("who hits hardest") by weight class'''
 
-def calculate_striking_power(df, prior_strength=RATE_SHRINKAGE_PRIOR_STRENGTH):
+def calculate_striking_power(df, prior_strength=POWER_SHRINKAGE_PRIOR_STRENGTH):
     """
     Per-fighter, per-weight-class knockdown rate per head strike landed
     (kd / head_strikes_landed), shrunk toward that weight class's own
     population rate. Answers "who hits hardest," a different question from
     calculate_striking_potency's "who finishes fights":
+
+    Returns one row per (fighter, weight class) with NO volume floor
+    applied -- a building block, not a finished ranking. Calling .nlargest()
+    on it directly surfaces 1-strike careers and thin pseudo-divisions
+    ('Catch Weight Bout', 'Open Weight Bout') whose own baseline is noise;
+    use get_power_by_weight_class (min_head_strikes_landed) or filter on
+    head_strikes_landed for a usable list.
 
     - Not win-conditioned. A knockdown the opponent survives -- fight
       continues, maybe even ends in a loss on the scorecards -- still
@@ -1266,9 +1281,18 @@ def calculate_striking_power(df, prior_strength=RATE_SHRINKAGE_PRIOR_STRENGTH):
     applies, for the same reason). Draws are kept, since a draw still
     reflects real landed strikes and real knockdowns.
     """
-    not_nc = (df['fight_result_fighter_1'] != 'NC') & (df['fight_result_fighter_2'] != 'NC')
+    # Reuse ude_points_algorithm.is_no_score_fight (result in {'NC'} OR
+    # method in {'DQ','Overturned'}) rather than a bare result == 'NC'
+    # check -- the same reason filter_invalid_rematches reuses it. A
+    # bare-NC check leaves 23 DQ/Overturned fights (7 with a knockdown) in
+    # the power denominators.
+    not_no_score = ~df.apply(
+        lambda r: is_no_score_fight(r['fight_result_fighter_1'], r['method'])
+        or is_no_score_fight(r['fight_result_fighter_2'], r['method']),
+        axis=1,
+    )
     not_injury = ~df['details'].astype(str).str.contains('injury', case=False, na=False)
-    valid = not_nc & not_injury
+    valid = not_no_score & not_injury
 
     power_1 = (
         df[valid]
@@ -1528,7 +1552,16 @@ def is_standing_ko_tko(method, details):
     return not any(keyword in details_lower for keyword in STANDING_KO_TKO_EXCLUDE_KEYWORDS)
 
 
-DURABILITY_SHRINKAGE_PRIOR_STRENGTH = 15.0  # in equivalent standing strikes absorbed
+# In equivalent standing strikes absorbed. At 15 the multiplier saturated
+# almost immediately: for the ~72% of fighter-fights whose opponent had no
+# prior standing-KO loss the formula reduces to 1 + absorbed/prior, so it
+# hit the 2.0 ceiling after just 15 absorbed strikes (median opponent
+# history is ~90), and the division baseline cancelled out of that branch
+# entirely -- ~63% of observations pinned at a bound. 300 is ~3x the median
+# opponent history: the ceiling now needs a genuinely long clean record,
+# ~11% of observations pin, and the division baseline drives the result for
+# the majority of fights rather than a quarter of them.
+DURABILITY_SHRINKAGE_PRIOR_STRENGTH = 300.0
 DURABILITY_MIN_MULTIPLIER = 0.5
 DURABILITY_MAX_MULTIPLIER = 2.0
 DURABILITY_MIN_DIVISION_OBSERVATIONS = 3000  # in standing strikes absorbed, before falling back to the dataset-wide rate
@@ -1566,16 +1599,25 @@ def add_opponent_durability_multiplier(df, prior_strength=DURABILITY_SHRINKAGE_P
 
     Baseline is scoped to the CURRENT FIGHT's weight class, not one
     dataset-wide number -- checked directly against the live dataset: the
-    standing KO/TKO-loss rate per strike absorbed spans an 8.4x range
-    across divisions (HW 0.64% vs. WSW 0.076%), against which a single
-    global baseline (0.33%) is badly miscalibrated in a predictable
+    standing KO/TKO-loss rate per strike absorbed spans an ~8x range
+    across divisions (HW ~0.64% vs. WSW ~0.08%), against which a single
+    global baseline (~0.33%) is badly miscalibrated in a predictable
     direction for almost every division -- systematically too low for
     heavier weight classes (pushing multipliers toward the ceiling) and
-    too high for lighter ones (pushing them toward the floor). Confirmed
-    this was the actual cause, not a hypothetical: with the single global
-    baseline, 64% of all fighter-fight observations sat pinned at one of
-    the two bounds (51.4% at the ceiling, 12.5% at the floor), leaving
-    only 36% in the discriminating middle range.
+    too high for lighter ones (pushing them toward the floor).
+
+    prior_strength matters as much as the baseline scoping. When the
+    opponent has no prior standing-KO loss (~72% of fighter-fights) the
+    shrunk rate is prior_strength*baseline / (absorbed + prior_strength)
+    and raw = baseline / shrunk = (absorbed + prior_strength) /
+    prior_strength -- the baseline cancels, and the multiplier is a plain
+    ramp that hits the 2.0 ceiling once absorbed >= prior_strength. At the
+    old prior_strength=15 that fired for almost everyone (~63% of all
+    observations pinned at a bound) and the division baseline was doing
+    nothing for three-quarters of the data. DURABILITY_SHRINKAGE_PRIOR_STRENGTH
+    is now 300 (~3x the ~90-strike median opponent history): ~11% pin, the
+    ceiling requires a genuinely long clean record, and the division
+    baseline drives the result for the majority of fights.
 
     Each fighter's own cumulative absorbed-strikes/losses STATE is still
     tracked globally per fighter_url, not reset per weight class --
@@ -1590,7 +1632,11 @@ def add_opponent_durability_multiplier(df, prior_strength=DURABILITY_SHRINKAGE_P
     fallback" pattern _build_temporal_calibration_cache already uses for
     age/method calibration.
     """
-    d = df.sort_values(by='event_date').copy()
+    # fight_url tiebreaks same-date rows (pandas' sort is not stable) -- the
+    # cumulative-state loop below is a chronological state machine and must
+    # process a fighter's same-day bouts in a fixed order; see
+    # data_integrity_and_invariants.md.
+    d = df.sort_values(by=['event_date', 'fight_url']).copy()
     d['event_date'] = pd.to_datetime(d['event_date'])
 
     # str(details) turns a NaN details value into the literal string 'nan',
@@ -1659,20 +1705,27 @@ def add_opponent_durability_multiplier(df, prior_strength=DURABILITY_SHRINKAGE_P
     d['opponent_durability_multiplier_fighter_1'] = mult_1
     d['opponent_durability_multiplier_fighter_2'] = mult_2
     d = d.drop(columns=['_standing_ko_tko'])
-    return d.sort_values(by='event_date', ascending=False).reset_index(drop=True)
+    return d.sort_values(by=['event_date', 'fight_url'], ascending=[False, True]).reset_index(drop=True)
 
 
-def calculate_durability_adjusted_power(df, prior_strength_kd=RATE_SHRINKAGE_PRIOR_STRENGTH,
+def calculate_durability_adjusted_power(df, prior_strength_kd=POWER_SHRINKAGE_PRIOR_STRENGTH,
                                          prior_strength_durability=DURABILITY_SHRINKAGE_PRIOR_STRENGTH):
     """
     calculate_striking_power(), reweighted so a knockdown scored against a
     historically durable opponent counts for more than one scored against
     a historically fragile opponent. See add_opponent_durability_multiplier.
+
+    Same "building block, apply a volume floor before ranking" caveat as
+    calculate_striking_power -- use get_durability_adjusted_power_by_weight_class.
     """
     d = add_opponent_durability_multiplier(df, prior_strength=prior_strength_durability)
-    not_nc = (d['fight_result_fighter_1'] != 'NC') & (d['fight_result_fighter_2'] != 'NC')
+    not_no_score = ~d.apply(
+        lambda r: is_no_score_fight(r['fight_result_fighter_1'], r['method'])
+        or is_no_score_fight(r['fight_result_fighter_2'], r['method']),
+        axis=1,
+    )
     not_injury = ~d['details'].astype(str).str.contains('injury', case=False, na=False)
-    valid = not_nc & not_injury
+    valid = not_no_score & not_injury
 
     def side(fighter_col, opponent_col, multiplier_col):
         weighted_kd_col = f'_weighted_kd_{fighter_col}'
@@ -1739,11 +1792,18 @@ STYLE_SIMILARITY_COLUMNS = [
     'dynamic_td_accuracy', 'dynamic_td_defence',
 ]
 
-def generate_fighter_profile(df, fighter_name):
+def generate_fighter_profile(df, fighter_name, as_of=None):
     """
     One-row physical + style profile for a fighter: their current age,
     height, reach, stance, and the cumulative dynamic_* skill snapshot
     from their most recent fight.
+
+    as_of: if set, the profile is built only from fights strictly before
+    this date -- required for any retrospective/backtest call, where the
+    fighter's chronologically last row in the full df is AFTER the matchup
+    being analysed and its dynamic_* snapshot has absorbed later results.
+    None (default) uses the latest fight in df, correct for a genuinely
+    upcoming fight.
 
     A notebook this was adapted from stated an intent to compare fighters
     on "age, height, reach, stance" but never actually captured age
@@ -1771,9 +1831,13 @@ def generate_fighter_profile(df, fighter_name):
     rules). df without a Stance column (e.g. plain v2_6.csv) still works;
     the profile's 'Stance' value is just None in that case.
     """
+    if as_of is not None:
+        df = df[pd.to_datetime(df['event_date']) < pd.to_datetime(as_of)]
+
     career = create_fighter_career_dataset(df, fighter_name)
     if career.empty:
-        raise ValueError(f"No fights found for fighter '{fighter_name}'")
+        raise ValueError(f"No fights found for fighter '{fighter_name}'"
+                         + (f" before {pd.to_datetime(as_of).date()}" if as_of is not None else ""))
 
     latest = career.sort_values(by='event_date', ascending=False).iloc[0]
     profile = {'fighter': fighter_name, 'fighter_url': latest['fighter_url'],
@@ -1794,12 +1858,26 @@ def _stance_match_label(future_stance, past_stance):
     return 'same' if future_stance == past_stance else 'different'
 
 
-def calculate_similarity_differences(future_profile, career_dataset, columns_to_compare):
+def calculate_similarity_differences(future_profile, career_dataset, columns_to_compare, min_columns=None):
     """
     Signed, SCALED differences between a future opponent's profile and
     each of a fighter's past opponents (from create_fighter_career_dataset's
     opponent_* columns), summed into one total_difference per past
     opponent and sorted smallest-first (most similar first).
+
+    min_columns: minimum number of compared columns that must have real
+    (non-NaN) data before a past opponent gets a ranked total_difference.
+    None (default) -> require ALL columns when comparing 3 or fewer
+    (physical: age/height/reach -- with only three axes a missing one is
+    a materially weaker match), allow one missing when comparing 4+
+    (style). A row below the floor keeps its per-column diffs and its
+    n_columns_compared count in the output, but its total_difference is
+    NaN so it sorts to the bottom rather than winning the ranking on a
+    thin subset -- averaging |diff| over only the present columns grades a
+    data-poor candidate on an easier, smaller test, so incompleteness
+    would otherwise read as similarity. Callers wanting a usable list
+    should take rows where total_difference.notna(), or filter on
+    n_columns_compared directly.
 
     Fixes a real bug in the notebook this was adapted from: it summed raw,
     unscaled absolute differences across columns living on wildly
@@ -1831,7 +1909,16 @@ def calculate_similarity_differences(future_profile, career_dataset, columns_to_
     if future_profile.shape[0] != 1:
         raise ValueError("Future opponent profile must contain exactly one row.")
 
+    if min_columns is None:
+        min_columns = len(columns_to_compare) if len(columns_to_compare) <= 3 \
+            else len(columns_to_compare) - 1
+
     result = career_dataset[['opponent', 'opponent_fighter_url']].copy()
+    if 'event_date' in career_dataset.columns:
+        # The date fighter actually met this past opponent -- makes a
+        # rematch's duplicate rows self-explaining, and lets a caller see
+        # which meeting's as-of stats a style comparison rests on.
+        result['fight_date'] = career_dataset['event_date'].values
 
     if 'Stance' in future_profile.columns and 'opponent_Stance' in career_dataset.columns:
         future_stance = future_profile['Stance'].values[0]
@@ -1856,9 +1943,13 @@ def calculate_similarity_differences(future_profile, career_dataset, columns_to_
         if pd.isna(col_range) or col_range == 0:
             # Every value on this dimension (including the future
             # opponent's) is identical or missing -- no discriminating
-            # information here, so this column contributes nothing rather
-            # than a divide-by-zero or an arbitrary tie-breaker.
-            scaled_diff = pd.Series(0.0, index=career_dataset.index)
+            # information here. Emit NaN, not 0.0: a 0.0 fed into the
+            # skipna=True mean below reads as PERFECT agreement on this
+            # column and drags total_difference toward a false top rank
+            # (exactly the "neutral state resolving to a boundary value"
+            # bug class in data_integrity_and_invariants.md). NaN genuinely
+            # drops the column from the row's mean instead.
+            scaled_diff = pd.Series(np.nan, index=career_dataset.index)
         else:
             scaled_diff = (past_values - col_min) / col_range - (future_value - col_min) / col_range
 
@@ -1868,32 +1959,51 @@ def calculate_similarity_differences(future_profile, career_dataset, columns_to_
     # total_difference is the MEAN of the available |diff| values per row,
     # not a sum with missing columns filled to 0. Filling-to-0 would make
     # a past opponent with NO data on any compared dimension score a
-    # perfect 0.0 "total difference" -- ranking them as the single most
-    # similar opponent despite there being zero actual information to
-    # support that. Averaging only the columns that ARE present avoids
-    # crediting missing data as agreement, and a row missing every
-    # comparison column correctly becomes NaN (which pandas sorts to the
-    # end), rather than a false top rank.
-    result['total_difference'] = pd.concat(abs_diffs, axis=1).mean(axis=1, skipna=True)
+    # perfect 0.0 "total difference". But mean-of-available has its own
+    # failure: a candidate scored on 1 of 3 columns is graded on an
+    # easier, smaller test than one scored on all 3, so missing data
+    # reads as similarity. n_columns_compared exposes how many columns a
+    # score actually rests on, and any row below min_columns gets a NaN
+    # total_difference so it sorts past the fully-compared candidates
+    # instead of beating them on a thin subset.
+    stacked = pd.concat(abs_diffs, axis=1)
+    result['n_columns_compared'] = stacked.notna().sum(axis=1).values
+    total = stacked.mean(axis=1, skipna=True)
+    total[result['n_columns_compared'].values < min_columns] = np.nan
+    result['total_difference'] = total.values
     return result.sort_values(by='total_difference').reset_index(drop=True)
 
 
-def calculate_physical_similarity(future_profile, career_dataset):
+def calculate_physical_similarity(future_profile, career_dataset, min_columns=None):
     """Physical-similarity ranking (age, height, reach) of a fighter's past opponents against a future opponent."""
-    return calculate_similarity_differences(future_profile, career_dataset, PHYSICAL_SIMILARITY_COLUMNS)
+    return calculate_similarity_differences(future_profile, career_dataset, PHYSICAL_SIMILARITY_COLUMNS, min_columns)
 
 
-def calculate_style_similarity(future_profile, career_dataset):
+def calculate_style_similarity(future_profile, career_dataset, min_columns=None):
     """Fighting-style-similarity ranking (striking/TD accuracy & defense) of past opponents against a future opponent."""
-    return calculate_similarity_differences(future_profile, career_dataset, STYLE_SIMILARITY_COLUMNS)
+    return calculate_similarity_differences(future_profile, career_dataset, STYLE_SIMILARITY_COLUMNS, min_columns)
 
 
-def find_most_similar_past_opponents(df, fighter_name, future_opponent_name, exclude_future_opponent=True):
+def find_most_similar_past_opponents(df, fighter_name, future_opponent_name, exclude_future_opponent=True,
+                                     as_of=None, min_columns=None):
     """
     For fighter_name's upcoming fight against future_opponent_name, find
     which of fighter_name's PAST opponents most resemble future_opponent_name
     -- physically and stylistically, reported SEPARATELY (see module-level
     note on PHYSICAL_SIMILARITY_COLUMNS/STYLE_SIMILARITY_COLUMNS for why).
+
+    as_of: if set, only fights strictly before this date are used -- for
+    both the future opponent's profile AND fighter_name's past-opponent
+    set. Pass it for any retrospective or backtest call; without it a
+    historical matchup silently uses the future opponent's stats as they
+    stand today, after the fight in question and everything since. None
+    (default) is correct only for a genuinely upcoming fight.
+
+    min_columns: passed through to calculate_similarity_differences -- the
+    minimum number of real (non-NaN) comparison columns a past opponent
+    needs before it gets a ranked score rather than a NaN total_difference.
+    None -> at most one missing column. Each returned frame also carries
+    n_columns_compared so the caller can see what a score rests on.
 
     exclude_future_opponent: if True (default), drops future_opponent_name's
     own past meeting(s) with fighter_name from the comparison. Without
@@ -1906,8 +2016,12 @@ def find_most_similar_past_opponents(df, fighter_name, future_opponent_name, exc
     fighters can share a name; URLs can't collide).
 
     Returns (physical_similarity_df, style_similarity_df), each sorted
-    most-similar-first via total_difference.
+    most-similar-first via total_difference (NaN, i.e. under-covered, rows
+    last).
     """
+    if as_of is not None:
+        df = df[pd.to_datetime(df['event_date']) < pd.to_datetime(as_of)]
+
     future_profile = generate_fighter_profile(df, future_opponent_name)
     career_dataset = create_fighter_career_dataset(df, fighter_name)
 
@@ -1915,6 +2029,335 @@ def find_most_similar_past_opponents(df, fighter_name, future_opponent_name, exc
         future_opponent_url = future_profile['fighter_url'].values[0]
         career_dataset = career_dataset[career_dataset['opponent_fighter_url'] != future_opponent_url]
 
-    physical = calculate_physical_similarity(future_profile, career_dataset)
-    style = calculate_style_similarity(future_profile, career_dataset)
+    physical = calculate_physical_similarity(future_profile, career_dataset, min_columns)
+    style = calculate_style_similarity(future_profile, career_dataset, min_columns)
     return physical, style
+
+
+'''15. Fighter trajectory (declining / stable / improving)'''
+
+TRAJECTORY_RATIO_METRICS = {
+    # metric_name: (own_landed_col, own_attempted_col, is_defence)
+    'striking_accuracy': ('sig_strikes_landed', 'sig_strikes_attempted', False),
+    'striking_defence': ('_opp_sig_avoided', 'opponent_sig_strikes_attempted', True),
+    'grappling_accuracy': ('td_landed', 'td_attempted', False),
+    'grappling_defence': ('_opp_td_avoided', 'opponent_td_attempted', True),
+}
+
+
+def _build_fight_long_format(df):
+    """One row per fighter-per-fight, both sides, carrying only the raw
+    (non-cumulative) columns a trajectory computation needs. Distinct from
+    create_fighter_career_dataset: that function is built for one named
+    fighter at a time (used throughout this file for profile/similarity
+    work); this melts the WHOLE roster in one pass so trajectory can be
+    computed for every fighter at once via groupby, not a per-name loop.
+
+    `opponent_quality_score` here is `quality_score_fighter_{opp}` -- the
+    OTHER side's own quality_score column. Verified directly against
+    ude_points_algorithm.py's scoring loop (the line
+    `df.at[index, f'quality_score_{opponent_col}'] = round(oq_quality, 6)`,
+    where oq_quality is computed FROM that same opponent_col side's own
+    pre-fight record): quality_score_fighter_1 is fighter_1's OWN
+    accomplishment-based rating, not a rating of whoever fighter_1 fought.
+    So from fighter_1's row, fighter_1's own quality is quality_score_fighter_1
+    and the actual in-fight opponent's quality is quality_score_fighter_2 --
+    matching the intuitive column names, not inverted. Cross-checked against
+    Islam Makhachev's real fight history: his own quality_score climbs
+    steadily with his career regardless of opponent, while his
+    opponent_quality_score correctly tracks per-fight opponent difficulty
+    (e.g. lower for Renato Moicano than for Volkanovski or Della Maddalena).
+    """
+    def side(me, opp):
+        return pd.DataFrame({
+            'fighter': df[f'fighter_{me}'], 'opponent': df[f'fighter_{opp}'],
+            'event_date': df['event_date'], 'weight_class_cleaned': df['weight_class_cleaned'],
+            'is_title_bout': df['is_title_bout'], 'is_champion': df[f'is_champion_fighter_{me}'],
+            'fight_result': df[f'fight_result_fighter_{me}'],
+            'pdi_margin': df[f'pdi_margin_fighter_{me}'],
+            'sig_strikes_landed': df[f'sig_strikes_landed_fighter_{me}'],
+            'sig_strikes_attempted': df[f'sig_strikes_attempted_fighter_{me}'],
+            'td_landed': df[f'td_landed_fighter_{me}'],
+            'td_attempted': df[f'td_attempted_fighter_{me}'],
+            'opponent_sig_strikes_landed': df[f'sig_strikes_landed_fighter_{opp}'],
+            'opponent_sig_strikes_attempted': df[f'sig_strikes_attempted_fighter_{opp}'],
+            'opponent_td_landed': df[f'td_landed_fighter_{opp}'],
+            'opponent_td_attempted': df[f'td_attempted_fighter_{opp}'],
+            'opponent_quality_score': df[f'quality_score_fighter_{opp}'],
+            'fight_row': df.index, 'fight_url': df['fight_url'],
+        })
+
+    long = pd.concat([side('1', '2'), side('2', '1')], ignore_index=True)
+    long['event_date'] = pd.to_datetime(long['event_date'])
+    long['_opp_sig_avoided'] = (long['opponent_sig_strikes_attempted'] - long['opponent_sig_strikes_landed']).clip(lower=0)
+    long['_opp_td_avoided'] = (long['opponent_td_attempted'] - long['opponent_td_landed']).clip(lower=0)
+    return long
+
+
+def calculate_fighter_trajectory(df, trailing_n=3, min_baseline_fights=5, min_attempts=5, min_next_fights=1):
+    """
+    For EVERY fighter in df at once (vectorized via groupby, not a per-name
+    loop), computes whether they were declining, stable, or improving
+    entering each of their fights -- built to answer "was fighter X past
+    their best when they took this fight," a question no existing column
+    in this project can answer (dynamic_*/career_*/phase_* columns are all
+    cumulative, all-history-to-date averages with no recency weighting;
+    confirmed by reading ude_points_feature_engineering_pipeline.py,
+    ude_points_utils.py, and ude_points_algorithm.py in full).
+
+    Method: trailing-N-fight window vs. a non-overlapping baseline of
+    everything before that window. gap = trailing - baseline; negative on
+    an output measure means declining, positive means improving. Both
+    windows are computed using ONLY fights strictly before the fight in
+    question (never including it), so the gap at any given fight describes
+    what the fighter looked like ENTERING it -- this can be read at any
+    point in a career, not just a fighter's most recent fight.
+
+    What this does NOT tell you, and a mistake already made with it once
+    (2026-09-07, corrected): a positive/flat gap entering a fight a fighter
+    then LOST only means they weren't declining walking in -- it says
+    nothing about whether that loss itself started a decline. That is a
+    separate, forward-looking claim, and checking it requires the
+    fighter's NEXT fight's gap (the loss becomes part of that next
+    trailing window) -- which may not exist in the data yet. Don't
+    describe a loss as "just one bad night, nothing's wrong" from the
+    entering-gap alone; that reads the window's INPUT boundary (fights
+    before) as if it were an OUTPUT claim (what happened after). State
+    only what the window actually covers, and say explicitly when the
+    stronger, forward-looking claim is unverified because no next fight
+    exists yet -- or better, check the `fights_after`/
+    `next_fight_data_sufficient` columns below rather than relying on
+    remembering to ask: they turn this exact caveat into something a
+    caller can filter/assert on directly instead of having to know to
+    look for it.
+
+    Reported as five separate, named dimensions rather than one blended
+    "form score" (per this project's general preference for transparent
+    multi-column reporting over a hand-tuned composite for non-UDE-Points
+    content): `pdi_margin` (the existing 5-phase dominance index, not
+    reinvented here), striking accuracy/defence, grappling (takedown)
+    accuracy/defence -- the latter four computed as sum(landed)/sum(attempted)
+    over each window (matching add_dynamic_strike_accuracy/add_dynamic_td_accuracy's
+    own cumulative-ratio convention exactly, just windowed instead of
+    career-long), not a mean of per-fight ratios, so one low-volume fight
+    can't swing the window average the way it would under a naive mean.
+    `opponent_quality_score` is included as CONTEXT, not a decline signal
+    itself -- a real output drop against much tougher recent opposition
+    isn't the same claim as a drop against similar-quality opposition, and
+    this lets a caller tell the two apart rather than conflating them.
+
+    Validated (2026-09-07) against 8 fighters with well-documented
+    trajectories: correctly flags Anderson Silva's decline a full year
+    before his first loss to Weidman, and Israel Adesanya's decline
+    starting mid-2021 (both in pdi_margin and striking_defence,
+    independently) well before it became final in his title loss. Correctly
+    shows NO decline signal for Islam Makhachev and Merab Dvalishvili
+    (still-active, undefeated-or-near-it fighters) across every dimension.
+
+    PREDICTIVE POWER IS WEAK -- READ BEFORE CLAIMING THIS "PREDICTS" A
+    RESULT. The above face-validity check only confirms the gap matches
+    known narratives in hindsight, on ~10 hand-picked fighters. A separate
+    systematic backtest (2026-09-08, `content_research/fighter_trajectory/backtest.py`,
+    ~4,800-4,900 fighter-fights with a valid gap, both a continuous
+    pdi_margin-outcome OLS and a win/loss logistic model, each controlling
+    for the real opponent's quality in that specific fight) found:
+    - `pdi_margin_gap`, the headline metric, does NOT significantly predict
+      win/loss (p=0.247) and the win-rate spread across quintiles is
+      nearly flat (49.1% bottom to 50.1% top). It has only a weak,
+      barely-significant relationship with continuous performance
+      (p=0.037). Don't describe it as predicting outcomes.
+    - `striking_defence_gap` is the ONLY dimension with real, robust
+      signal in both models (win/loss p=0.019, odds ratio 2.03; continuous
+      p=0.012) -- but even its real-world effect size is modest: comparing
+      a fighter at the 10th vs. 90th percentile of this metric predicts
+      only a 47.0% vs. 51.3% win rate (+4.3 points), not a decisive edge.
+    - `grappling_defence_gap` is marginal on the continuous outcome
+      (p=0.039) but NOT significant on win/loss (p=0.326); its bucketed
+      win rates are noisy and non-monotonic. Don't lean on it alone.
+    - `striking_accuracy_gap` and `grappling_accuracy_gap` show NO
+      significant relationship with either outcome (p=0.30-0.49 across
+      both models for both), and both have the WRONG-signed coefficient
+      (higher recent accuracy predicting a slightly lower win rate) --
+      a clean null result, not even a weak positive one.
+    - Every R^2 here is tiny (1.3%-1.5%): these gaps explain almost none
+      of what actually determines a fight's outcome, which is expected
+      (opponent quality, styles, and variance dominate) but means the
+      honest framing throughout this function's use is "a small,
+      detectable signal in one dimension," not "a reliable predictor."
+
+    WHICH METRIC FOR WHICH USE CASE (2026-09-08) -- don't default to
+    `pdi_margin_gap` just because it's the headline/first-listed one:
+    - Describing a KNOWN fight or resume in hindsight (e.g. "was this
+      champion's title-shot form declining," a Silva/Adesanya-style
+      retrospective, explaining a specific already-fought fight): use
+      `pdi_margin_gap` as the primary signal. It's the composite that
+      best matches known real-world narratives, and reporting all five
+      dimensions alongside it still surfaces the specific story (e.g.
+      Volkanovski's output was fine, only his defense eroded) -- that
+      texture is lost if only one column is ever looked at.
+    - Making a claim about a NOT-YET-DETERMINED future fight (an actual
+      forward-looking prediction): use `striking_defence_gap`. It is the
+      ONLY dimension the backtest above shows has real, robust predictive
+      power in both models. `pdi_margin_gap` does not significantly
+      predict win/loss (p=0.247) and should not anchor a forward-looking
+      claim, even though it's the more narratively useful signal for
+      hindsight description.
+    Neither use case licenses overclaiming: `pdi_margin_gap` is a
+    retrospective-narrative signal, not a predictor; `striking_defence_gap`
+    is a real but modest predictor (a 4.3-point win-rate edge at the
+    extremes), not a decisive one.
+
+    Args:
+    - df (pd.DataFrame): The full two-sided fight dataset.
+    - trailing_n (int): Size of the "recent form" window, in fights.
+      Default 3.
+    - min_baseline_fights (int): Minimum number of fights required in the
+      baseline window before a gap is reported at all; below this, gap is
+      NaN. Default 5. Exists because a baseline built on only 1-4 fights
+      is unreliable -- found via a real case: Jose Aldo's first computed
+      gap (2013-08, only 4 baseline fights) was a wild -2.65, an artifact
+      of too little history, not a real signal.
+    - min_attempts (int): For the four ratio metrics only (striking/grappling
+      accuracy/defence) -- minimum attempted-volume required in a window
+      before that window's value is reported; below it, NaN, independently
+      for trailing and baseline (so a solid baseline with too little recent
+      volume still shows baseline but not trailing/gap, and vice versa).
+      Default 5. Exists because fight-count alone doesn't guarantee real
+      volume: a pure striker can clear min_baseline_fights on fight count
+      while having thrown only 1-2 takedowns total -- found via a real
+      case, Carlos Ulberg's grappling_accuracy_gap of -0.75 and Sean
+      Strickland's of -0.64 were both built on a single career takedown
+      attempt in the trailing window, not a real trend (Strickland's
+      grappling_DEFENCE gap over the same stretch, by contrast, was backed
+      by real volume -- 16 attempts faced trailing vs. 61 baseline -- and
+      is a real signal).
+    - min_next_fights (int): Threshold for `next_fight_data_sufficient`
+      (see Returns) -- how many fights must exist AFTER a given fight
+      before a forward-looking claim about that fight's aftermath (e.g.
+      "did this loss start a decline") is considered checkable. Default 1.
+      Added (2026-09-08) specifically so that question doesn't depend on a
+      caller remembering the "What this does NOT tell you" caveat above --
+      `fights_after`/`next_fight_data_sufficient` make it a checkable field
+      instead of a remembered rule.
+
+    Returns:
+    - pd.DataFrame, one row per fighter-per-fight (long format, both sides
+      of every fight): fighter, opponent, event_date, weight_class_cleaned,
+      is_title_bout, is_champion, fight_result, fight_row, and for each of
+      pdi_margin/striking_accuracy/striking_defence/grappling_accuracy/
+      grappling_defence/opponent_quality_score: `{metric}_trailing{n}`,
+      `{metric}_baseline`, `{metric}_gap`. Also `fights_after` (int -- how
+      many MORE fights this fighter has in df after this one; 0 for a
+      fighter's most recent fight) and `next_fight_data_sufficient` (bool
+      -- `fights_after >= min_next_fights`). A forward-looking claim about
+      what a fight's outcome did to a fighter (as opposed to what their
+      form looked like entering it) should only be made where this is True.
+    """
+    long = _build_fight_long_format(df)
+    long = long.sort_values(['fighter', 'event_date'], kind='mergesort').reset_index(drop=True)
+    grp = long.groupby('fighter', sort=False)
+
+    baseline_fight_count = (grp.cumcount() - trailing_n).clip(lower=0)
+    long['fights_after'] = grp.cumcount(ascending=False)
+    long['next_fight_data_sufficient'] = long['fights_after'] >= min_next_fights
+
+    def _mean_trailing_baseline(col):
+        trailing = grp[col].transform(lambda s: s.shift(1).rolling(trailing_n).mean())
+        baseline = grp[col].transform(lambda s: s.shift(trailing_n + 1).expanding().mean())
+        return trailing, baseline
+
+    def _ratio_trailing_baseline(landed_col, attempted_col):
+        landed_trailing = grp[landed_col].transform(lambda s: s.shift(1).rolling(trailing_n).sum())
+        attempted_trailing = grp[attempted_col].transform(lambda s: s.shift(1).rolling(trailing_n).sum())
+        landed_baseline = grp[landed_col].transform(lambda s: s.shift(trailing_n + 1).expanding().sum())
+        attempted_baseline = grp[attempted_col].transform(lambda s: s.shift(trailing_n + 1).expanding().sum())
+        trailing = (landed_trailing / attempted_trailing).mask(attempted_trailing < min_attempts)
+        baseline = (landed_baseline / attempted_baseline).mask(attempted_baseline < min_attempts)
+        return trailing, baseline
+
+    for col in ['pdi_margin', 'opponent_quality_score']:
+        trailing, baseline = _mean_trailing_baseline(col)
+        gap = (trailing - baseline).mask(baseline_fight_count < min_baseline_fights)
+        long[f'{col}_trailing{trailing_n}'] = trailing
+        long[f'{col}_baseline'] = baseline.mask(baseline_fight_count < min_baseline_fights)
+        long[f'{col}_gap'] = gap
+
+    for name, (landed_col, attempted_col, _is_defence) in TRAJECTORY_RATIO_METRICS.items():
+        trailing, baseline = _ratio_trailing_baseline(landed_col, attempted_col)
+        gap = (trailing - baseline).mask(baseline_fight_count < min_baseline_fights)
+        long[f'{name}_trailing{trailing_n}'] = trailing
+        long[f'{name}_baseline'] = baseline.mask(baseline_fight_count < min_baseline_fights)
+        long[f'{name}_gap'] = gap
+
+    keep = ['fighter', 'opponent', 'event_date', 'weight_class_cleaned', 'is_title_bout',
+            'is_champion', 'fight_result', 'fight_row', 'fight_url',
+            'fights_after', 'next_fight_data_sufficient']
+    metric_cols = [c for c in long.columns if c.endswith(('_trailing' + str(trailing_n), '_baseline', '_gap'))]
+    return long[keep + metric_cols]
+
+
+def current_trajectory_snapshot(df, fighter_names=None, trailing_n=3, min_baseline_fights=5, min_attempts=5):
+    """
+    "As of right now" trajectory reading for one or more fighters -- unlike
+    calculate_fighter_trajectory's per-historical-fight gap (which always
+    excludes the fight it's reported on), this uses a fighter's most recent
+    trailing_n fights AS the trailing window (including their latest
+    fight) against everything before it as baseline, answering "is this
+    fighter, at this moment, showing decline/stability/improvement" rather
+    than "were they declining entering some past fight."
+
+    See calculate_fighter_trajectory's "What this does NOT tell you" note
+    -- same caveat applies here for any fighter whose most recent fight
+    was a loss: a positive/flat gap describes their form entering that
+    loss, not what the loss did to them. This function's own as_of_date
+    IS necessarily their latest fight, so there is by definition no next
+    fight yet to check that forward-looking question against.
+
+    Args:
+    - df (pd.DataFrame): The full two-sided fight dataset.
+    - fighter_names (list of str or None): Fighters to check. None (default)
+      checks every fighter in df with enough fights to qualify.
+    - trailing_n, min_baseline_fights, min_attempts: same meaning as
+      calculate_fighter_trajectory. A fighter with fewer than
+      trailing_n + min_baseline_fights total fights is skipped (insufficient
+      history for a baseline at all); the four ratio metrics are additionally
+      NaN, independently for trailing/baseline, wherever that window's
+      attempted-volume is below min_attempts.
+
+    Returns:
+    - pd.DataFrame, one row per qualifying fighter: fighter, as_of_date
+      (their most recent fight), last_opponent, and the same
+      {metric}_trailing{n}/{metric}_baseline/{metric}_gap columns as
+      calculate_fighter_trajectory, sorted by pdi_margin_gap ascending
+      (biggest apparent decline first).
+    """
+    long = _build_fight_long_format(df)
+    long = long.sort_values(['fighter', 'event_date'], kind='mergesort')
+    if fighter_names is not None:
+        long = long[long['fighter'].isin(fighter_names)]
+
+    rows = []
+    for fighter, g in long.groupby('fighter', sort=False):
+        g = g.reset_index(drop=True)
+        n_fights = len(g)
+        if n_fights < trailing_n + min_baseline_fights:
+            continue
+        trailing_slice = g.iloc[n_fights - trailing_n:]
+        baseline_slice = g.iloc[:n_fights - trailing_n]
+
+        row = {'fighter': fighter, 'as_of_date': g.iloc[-1]['event_date'], 'last_opponent': g.iloc[-1]['opponent'],
+               'last_fight_url': g.iloc[-1]['fight_url']}
+        for col in ['pdi_margin', 'opponent_quality_score']:
+            row[f'{col}_trailing{trailing_n}'] = trailing_slice[col].mean()
+            row[f'{col}_baseline'] = baseline_slice[col].mean()
+            row[f'{col}_gap'] = trailing_slice[col].mean() - baseline_slice[col].mean()
+        for name, (landed_col, attempted_col, _is_defence) in TRAJECTORY_RATIO_METRICS.items():
+            t_attempts, b_attempts = trailing_slice[attempted_col].sum(), baseline_slice[attempted_col].sum()
+            t_ratio = trailing_slice[landed_col].sum() / t_attempts if t_attempts >= min_attempts else np.nan
+            b_ratio = baseline_slice[landed_col].sum() / b_attempts if b_attempts >= min_attempts else np.nan
+            row[f'{name}_trailing{trailing_n}'] = t_ratio
+            row[f'{name}_baseline'] = b_ratio
+            row[f'{name}_gap'] = t_ratio - b_ratio
+        rows.append(row)
+
+    return pd.DataFrame(rows).sort_values('pdi_margin_gap', ascending=True).reset_index(drop=True)
