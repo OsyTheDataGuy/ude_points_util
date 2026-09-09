@@ -20,3 +20,16 @@ CLAUDE.md
 # maintained -- ignore local edits so it doesn't reappear as an untracked
 # change. canonical_project_state.md is the living source for anything current.
 age_calibration_validation.md
+
+# Commercial goals / monetization plan -- personal, holds money figures. Local only,
+# same as CLAUDE.md.
+project_north_star.md
+
+# Content & growth strategy -- kept local while the growth campaign is in progress
+# (sequencing, account handle, backlog). Not committed to the public repo for now.
+mma_content_strategy.md
+content_bank.md
+content_research/
+technical_writeup.md
+ChatGPT's suggestion for turning ude points dataset into content machine.docx
+dataset refresh 2026_09_08 report.md
