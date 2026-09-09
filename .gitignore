@@ -13,3 +13,10 @@ backups/
 # CLAUDE.md governs Claude sessions working in this local folder -- it stays
 # local forever, never pushed to the remote repo.
 CLAUDE.md
+
+# age_calibration_validation.md is the one-time backing doc for the age
+# recalibration (referenced from canonical_project_state.md and
+# ude_points_algorithm.py). It's committed once as a frozen reference and not
+# maintained -- ignore local edits so it doesn't reappear as an untracked
+# change. canonical_project_state.md is the living source for anything current.
+age_calibration_validation.md
