@@ -1790,6 +1790,7 @@ PHYSICAL_SIMILARITY_COLUMNS = ['age', 'Height (m)', 'Reach (in)']
 STYLE_SIMILARITY_COLUMNS = [
     'dynamic_sig_strikes_accuracy', 'dynamic_sig_strikes_defence',
     'dynamic_td_accuracy', 'dynamic_td_defence',
+    'dynamic_sig_strikes_attempt_rate', 'dynamic_td_attempt_rate',
 ]
 
 def generate_fighter_profile(df, fighter_name, as_of=None):

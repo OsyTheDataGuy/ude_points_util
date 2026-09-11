@@ -561,9 +561,60 @@ def add_time_and_per_min_features(df):
 
     for f in ['fighter_1', 'fighter_2']:
         new_cols[f'td_landed_per_15_minutes_{f}'] = round((df[f'td_landed_{f}'] / total_time) * 15, 2)
+        new_cols[f'td_attempted_per_15_minutes_{f}'] = round((df[f'td_attempted_{f}'] / total_time) * 15, 2)
 
     new_cols['td_conceded_per_15_minutes_fighter_1'] = round((df['td_landed_fighter_2'] / total_time) * 15, 2)
     new_cols['td_conceded_per_15_minutes_fighter_2'] = round((df['td_landed_fighter_1'] / total_time) * 15, 2)
+
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
+
+def add_dynamic_attempt_rate(df):
+    """
+    Cumulative running attempt-FREQUENCY entering each fight -- total
+    attempts so far / total cage time so far, scaled to a per-minute or
+    per-15-minute rate. Same chronological-state-machine shape as
+    add_dynamic_strike_accuracy/add_dynamic_td_accuracy (pre-fight
+    snapshot computed from state BEFORE this fight, state updated after),
+    but tracking how OFTEN a fighter attempts something rather than how
+    ACCURATE they are -- neither existing dynamic_* accuracy/defence
+    column nor the per-fight *_per_min/*_per_15_minutes columns capture
+    that: accuracy is landed/attempted (silent on volume), and the
+    per-fight rate columns are single-fight numbers, too noisy to use as
+    a stable style signature (one low-volume fight would make a
+    genuinely wrestling-heavy fighter look like they rarely shoot).
+
+    Added specifically so opponent-similarity style matching
+    (ude_points_utils.py STYLE_SIMILARITY_COLUMNS) can compare attempt
+    frequency as a real, cumulative career signal.
+
+    Must run after add_time_and_per_min_features (needs total_time_in_mins).
+
+    dynamic_sig_strikes_attempt_rate = cumulative significant strikes
+    attempted per minute of cage time. dynamic_td_attempt_rate =
+    cumulative takedowns attempted per 15 minutes of cage time (matches
+    td_landed_per_15_minutes' own scale).
+    """
+    specs = [
+        ('sig_strikes_attempted', 'dynamic_sig_strikes_attempt_rate', 1),
+        ('td_attempted', 'dynamic_td_attempt_rate', 15),
+    ]
+    new_cols = {f'{out}_{f}': [] for _, out, _ in specs for f in ['fighter_1', 'fighter_2']}
+    cumulative_time = {}
+    cumulative_count = {stat: {} for stat, _, _ in specs}
+
+    for row in df.itertuples(index=False):
+        total_time = getattr(row, 'total_time_in_mins')
+        for f_col in ['fighter_1', 'fighter_2']:
+            f_url = getattr(row, f'fighter_url_{f_col}')
+            c_time = cumulative_time.get(f_url, 0.0)
+            for stat, out, per_unit in specs:
+                c_count = cumulative_count[stat].get(f_url, 0.0)
+                rate = np.nan if c_time == 0 else round((c_count / c_time) * per_unit, 3)
+                new_cols[f'{out}_{f_col}'].append(rate)
+                count = getattr(row, f'{stat}_{f_col}')
+                cumulative_count[stat][f_url] = c_count + (count if pd.notna(count) else 0)
+            cumulative_time[f_url] = c_time + (total_time if pd.notna(total_time) else 0)
 
     return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
@@ -1057,6 +1108,10 @@ def engineer_all_features(
 
     # 10. Time calculations & per-minute rates
     df = add_time_and_per_min_features(df)
+
+    # 10b. Cumulative attempt-frequency (must run after 10 -- needs
+    # total_time_in_mins).
+    df = add_dynamic_attempt_rate(df)
 
     # 11. Differentials & Dominance Features
     df = process_dominance_differentials(df)
