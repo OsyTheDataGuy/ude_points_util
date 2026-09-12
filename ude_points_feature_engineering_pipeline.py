@@ -593,7 +593,28 @@ def add_dynamic_control_minute_rate(df):
     column in this file: NaN, not 0.0, so a similarity comparison drops
     the column from its mean instead of reading "no data yet" as a
     genuine zero rate.
+
+    MIN_CONTROL_MINUTES_FOR_RATE floor: below this much cumulative control
+    time, both columns are NaN rather than an unstable ratio. Found for
+    real, not assumed: Alex Pereira's dynamic_ground_strikes_per_control_minute
+    reached 30.000 (an order of magnitude above every other fighter
+    checked in a 7-fighter spot check) on a total career control base of
+    only 2.6 minutes across 13 fights -- a denominator that thin makes the
+    ratio swing wildly on a handful of incidental attempts (his own value
+    climbed 2.1 -> 30.0 as his career progressed). Checked the full
+    population (17,208 fighter-fight observations) before picking the
+    floor rather than guessing: binned by cumulative control-minutes
+    entering the fight, the max/p95 of the stored rate shrinks from
+    540/97 under 1 minute to 27/15 at 3-5 minutes to 15/7 at 20+ minutes
+    -- the tail never fully flattens (no floor eliminates every extreme
+    case), so 5.0 was picked as the point that comfortably excludes
+    Pereira's entire career (his max was 2.6) and cuts the worst of the
+    tail, while excluding "only" ~31% of nonzero observations rather than
+    the ~49% a 10-minute floor would. A real tradeoff, disclosed, not a
+    complete fix -- see data_dictionary.md.
     """
+    MIN_CONTROL_MINUTES_FOR_RATE = 5.0
+
     specs = [
         ('ground_strikes_attempted', 'dynamic_ground_strikes_per_control_minute'),
         ('sub_att', 'dynamic_sub_attempts_per_control_minute'),
@@ -608,7 +629,7 @@ def add_dynamic_control_minute_rate(df):
             c_ctrl = cumulative_ctrl_mins.get(f_url, 0.0)
             for stat, out in specs:
                 c_count = cumulative_count[stat].get(f_url, 0.0)
-                rate = np.nan if c_ctrl == 0 else round(c_count / c_ctrl, 3)
+                rate = np.nan if c_ctrl < MIN_CONTROL_MINUTES_FOR_RATE else round(c_count / c_ctrl, 3)
                 new_cols[f'{out}_{f_col}'].append(rate)
                 count = getattr(row, f'{stat}_{f_col}')
                 cumulative_count[stat][f_url] = c_count + (count if pd.notna(count) else 0)
