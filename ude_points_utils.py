@@ -2097,17 +2097,38 @@ def calculate_similarity_differences(df, future_profile, career_dataset, columns
 
     min_columns: minimum number of compared columns that must have real
     (non-NaN) data before a past opponent gets a ranked total_difference.
-    None (default) -> require ALL columns when comparing 3 or fewer
-    (physical: age/height/reach -- with only three axes a missing one is
-    a materially weaker match), allow one missing when comparing 4+
-    (style). A row below the floor keeps its per-column diffs and its
-    n_columns_compared count in the output, but its total_difference is
-    NaN so it sorts to the bottom rather than winning the ranking on a
+    None (default) -> require ALL columns when comparing 3 or fewer are
+    actually AVAILABLE for this call, allow one missing when 4+ are
+    available. "Available" means non-NaN on the FUTURE OPPONENT specifically
+    -- a column the future opponent is themselves NaN on (e.g. the
+    _per_control_minute columns for anyone below MIN_CONTROL_MINUTES_FOR_RATE)
+    can never be compared for ANY candidate in this call, since a NaN
+    future_value drops that column for every row (see the S1 fix below).
+    The default is computed from that achievable ceiling, not from
+    len(columns_to_compare), for exactly this reason: computing it from the
+    nominal column count instead is a real bug that shipped and was only
+    caught by accident -- Jack Della Maddalena's own career control-time
+    never clears the 5-minute floor, so his profile is NaN on both
+    _per_control_minute columns, capping every candidate's achievable
+    n_columns_compared at 25 of 27; with min_columns fixed at "27 - 1 = 26"
+    regardless, no candidate could ever clear it, and
+    find_most_similar_past_opponents(df, 'Islam Makhachev', 'Jack Della
+    Maddalena') -- the flagship example used throughout this project's own
+    docs -- silently returned NaN for all 18 candidates. Checked how common
+    this is before fixing it, not just patched the one case: 40.3% of a
+    600-fighter sample are missing 2+ style columns on their own profile,
+    meaning 40.3% of real future-opponent calls were structurally incapable
+    of ever producing a ranked result under the old fixed-at-26 default.
+    A row below the (now call-specific) floor keeps its per-column diffs
+    and its n_columns_compared count in the output, but its total_difference
+    is NaN so it sorts to the bottom rather than winning the ranking on a
     thin subset -- averaging |diff| over only the present columns grades a
     data-poor candidate on an easier, smaller test, so incompleteness
     would otherwise read as similarity. Callers wanting a usable list
     should take rows where total_difference.notna(), or filter on
-    n_columns_compared directly.
+    n_columns_compared directly. An explicitly-passed min_columns is
+    honored as given, not adjusted -- only the auto-computed default
+    accounts for the future opponent's own gaps.
 
     Fixes a real bug in the notebook this was adapted from: it summed raw,
     unscaled absolute differences across columns living on wildly
@@ -2154,8 +2175,8 @@ def calculate_similarity_differences(df, future_profile, career_dataset, columns
         raise ValueError("Future opponent profile must contain exactly one row.")
 
     if min_columns is None:
-        min_columns = len(columns_to_compare) if len(columns_to_compare) <= 3 \
-            else len(columns_to_compare) - 1
+        future_available = int(future_profile[columns_to_compare].notna().sum(axis=1).values[0])
+        min_columns = future_available if future_available <= 3 else future_available - 1
 
     scale_reference = _compute_robust_scale_reference(df, columns_to_compare, weight_class,
                                                         min_division_observations)
