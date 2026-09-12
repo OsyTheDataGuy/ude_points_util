@@ -1787,11 +1787,63 @@ def get_durability_adjusted_power_by_weight_class(power_ratings, weight_class, m
 # principle of not collapsing distinct signals into one opaque composite
 # (see canonical_project_state.md's "non-redundant signals" design goal).
 PHYSICAL_SIMILARITY_COLUMNS = ['age', 'Height (m)', 'Reach (in)']
-STYLE_SIMILARITY_COLUMNS = [
-    'dynamic_sig_strikes_accuracy', 'dynamic_sig_strikes_defence',
-    'dynamic_td_accuracy', 'dynamic_td_defence',
-    'dynamic_sig_strikes_attempt_rate', 'dynamic_td_attempt_rate',
-]
+
+# Style columns grouped into named axes rather than one flat list, so
+# calculate_style_similarity can report "similar in power, different in
+# grappling" instead of collapsing everything into one total_difference --
+# see calculate_similarity_differences' axis_map docs for why this was
+# needed once the column count grew past the original 6. STYLE_SIMILARITY_COLUMNS
+# below is derived from this (kept for any code that wants the flat list --
+# generate_fighter_profile, in particular, doesn't care about grouping).
+#
+# Placement reasoning, since a few columns could plausibly sit in more than
+# one axis:
+# - ground_strikes_accuracy/defence sit in grappling_control_and_finishing,
+#   not striking_placement -- "what a fighter does once it's on the ground"
+#   (takedown entries, control, ground strikes, submissions) is one story,
+#   and ground-strike OUTPUT specifically is what separates a real
+#   ground-and-pound fighter (Khabib, Jailton Almeida: high control time
+#   AND high ground-strike accuracy/output) from a wrestler who controls
+#   but doesn't strike much once there ("just holds on": high control time,
+#   low ground-strike accuracy/output). Control-time alone can't make that
+#   distinction; putting ground-strike quality in the same axis as
+#   control-time and sub-attempt-rate is what lets it.
+# - clinch_strikes_accuracy/defence and distance_strikes_accuracy/defence
+#   sit in striking_placement alongside head/body/leg -- both are "where
+#   and how well do they land while free to strike" (clinch entries mostly
+#   feed exchanges, not extended control, unlike ground), grouped with
+#   target-mix rather than with the grappling axis.
+# - Position USAGE (share/rate of ground vs. clinch vs. distance) is a
+#   separate axis (phase_preference) from position ACCURACY -- "how much
+#   they live there" and "how good they are there" are different questions
+#   (see add_dynamic_strike_position_share's docstring), so a fighter can
+#   be similar on one and not the other.
+STYLE_SIMILARITY_AXES = {
+    'power': [
+        'dynamic_kd_rate',
+    ],
+    'output_pace': [
+        'dynamic_sig_strikes_attempt_rate', 'dynamic_td_attempt_rate',
+    ],
+    'striking_placement': [
+        'dynamic_head_strikes_accuracy', 'dynamic_head_strikes_defence',
+        'dynamic_body_strikes_accuracy', 'dynamic_body_strikes_defence',
+        'dynamic_leg_strikes_accuracy', 'dynamic_leg_strikes_defence',
+        'dynamic_clinch_strikes_accuracy', 'dynamic_clinch_strikes_defence',
+        'dynamic_distance_strikes_accuracy', 'dynamic_distance_strikes_defence',
+    ],
+    'phase_preference': [
+        'dynamic_ground_strikes_share', 'dynamic_clinch_strikes_share', 'dynamic_distance_strikes_share',
+        'dynamic_ground_strikes_attempt_rate', 'dynamic_clinch_strikes_attempt_rate',
+        'dynamic_distance_strikes_attempt_rate',
+    ],
+    'grappling_control_and_finishing': [
+        'dynamic_td_accuracy', 'dynamic_td_defence',
+        'dynamic_ctrl_time_share', 'dynamic_sub_att_rate',
+        'dynamic_ground_strikes_accuracy', 'dynamic_ground_strikes_defence',
+    ],
+}
+STYLE_SIMILARITY_COLUMNS = [col for cols in STYLE_SIMILARITY_AXES.values() for col in cols]
 
 def generate_fighter_profile(df, fighter_name, as_of=None):
     """
@@ -1859,12 +1911,36 @@ def _stance_match_label(future_stance, past_stance):
     return 'same' if future_stance == past_stance else 'different'
 
 
-def calculate_similarity_differences(future_profile, career_dataset, columns_to_compare, min_columns=None):
+def calculate_similarity_differences(future_profile, career_dataset, columns_to_compare, min_columns=None,
+                                      axis_map=None):
     """
     Signed, SCALED differences between a future opponent's profile and
     each of a fighter's past opponents (from create_fighter_career_dataset's
     opponent_* columns), summed into one total_difference per past
     opponent and sorted smallest-first (most similar first).
+
+    axis_map: optional {axis_name: [columns]} (e.g. STYLE_SIMILARITY_AXES)
+    to additionally report a per-axis mean |diff| (axis_<name>_difference)
+    and coverage count (axis_<name>_n_compared), alongside the existing
+    flat total_difference/n_columns_compared computed over ALL of
+    columns_to_compare. Added once STYLE_SIMILARITY_COLUMNS grew past 6
+    columns (power/output-pace/striking-placement/phase-preference/
+    grappling axes): a single flat mean over 20+ columns implicitly
+    overweights whichever theme happens to own the most columns (grappling
+    columns alone would otherwise outnumber pure-striking ones and quietly
+    dominate the average) and collapses "similar in power, different in
+    grappling" into one number that can't say which. total_difference is
+    kept as-is for ranking/sorting -- it is NOT replaced by an average of
+    the axes -- so existing callers (and the sort itself) are unaffected;
+    axis_map only adds columns. Columns not covered by any axis in
+    axis_map still count toward total_difference as before; a column in
+    axis_map not present in columns_to_compare is silently skipped rather
+    than erroring, so a caller can pass a shared axis_map even when calling
+    with a column subset. No min_columns-style floor is applied per axis in
+    this pass -- an axis's own size varies a lot (power is 1 column,
+    grappling is several), so a single coverage rule wouldn't fit both;
+    axis_<name>_n_compared is exposed so a caller can apply their own
+    judgment per axis instead.
 
     min_columns: minimum number of compared columns that must have real
     (non-NaN) data before a past opponent gets a ranked total_difference.
@@ -1927,7 +2003,7 @@ def calculate_similarity_differences(future_profile, career_dataset, columns_to_
             lambda past_stance: _stance_match_label(future_stance, past_stance)
         )
 
-    abs_diffs = []
+    abs_diffs = {}
 
     for column in columns_to_compare:
         career_column = f'opponent_{column}'
@@ -1955,7 +2031,7 @@ def calculate_similarity_differences(future_profile, career_dataset, columns_to_
             scaled_diff = (past_values - col_min) / col_range - (future_value - col_min) / col_range
 
         result[f'diff_{column}'] = scaled_diff.values
-        abs_diffs.append(scaled_diff.abs())
+        abs_diffs[column] = scaled_diff.abs()
 
     # total_difference is the MEAN of the available |diff| values per row,
     # not a sum with missing columns filled to 0. Filling-to-0 would make
@@ -1967,11 +2043,21 @@ def calculate_similarity_differences(future_profile, career_dataset, columns_to_
     # score actually rests on, and any row below min_columns gets a NaN
     # total_difference so it sorts past the fully-compared candidates
     # instead of beating them on a thin subset.
-    stacked = pd.concat(abs_diffs, axis=1)
+    stacked = pd.concat(list(abs_diffs.values()), axis=1)
     result['n_columns_compared'] = stacked.notna().sum(axis=1).values
     total = stacked.mean(axis=1, skipna=True)
     total[result['n_columns_compared'].values < min_columns] = np.nan
     result['total_difference'] = total.values
+
+    if axis_map:
+        for axis_name, axis_columns in axis_map.items():
+            axis_cols_present = [c for c in axis_columns if c in abs_diffs]
+            if not axis_cols_present:
+                continue
+            axis_stacked = pd.concat([abs_diffs[c] for c in axis_cols_present], axis=1)
+            result[f'axis_{axis_name}_n_compared'] = axis_stacked.notna().sum(axis=1).values
+            result[f'axis_{axis_name}_difference'] = axis_stacked.mean(axis=1, skipna=True).values
+
     return result.sort_values(by='total_difference').reset_index(drop=True)
 
 
@@ -1981,8 +2067,18 @@ def calculate_physical_similarity(future_profile, career_dataset, min_columns=No
 
 
 def calculate_style_similarity(future_profile, career_dataset, min_columns=None):
-    """Fighting-style-similarity ranking (striking/TD accuracy & defense) of past opponents against a future opponent."""
-    return calculate_similarity_differences(future_profile, career_dataset, STYLE_SIMILARITY_COLUMNS, min_columns)
+    """
+    Fighting-style-similarity ranking of past opponents against a future
+    opponent, across STYLE_SIMILARITY_COLUMNS. Also reports a per-axis
+    breakdown (axis_<name>_difference / _n_compared) via STYLE_SIMILARITY_AXES
+    -- see calculate_similarity_differences' axis_map docs -- so two
+    fighters who land on a similar overall total_difference for different
+    reasons (similar power, different grappling vs. similar grappling,
+    different power) are distinguishable in the output, not collapsed into
+    one number.
+    """
+    return calculate_similarity_differences(future_profile, career_dataset, STYLE_SIMILARITY_COLUMNS, min_columns,
+                                             axis_map=STYLE_SIMILARITY_AXES)
 
 
 def find_most_similar_past_opponents(df, fighter_name, future_opponent_name, exclude_future_opponent=True,

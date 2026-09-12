@@ -403,7 +403,15 @@ def add_defense_columns(df):
     return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
 def add_dynamic_strike_accuracy(df):
-    strike_types = ['sig', 'head', 'body', 'leg']
+    # 'ground'/'clinch'/'distance' are POSITION, not target -- landed/attempted
+    # while in that phase regardless of where on the body it lands. Added for
+    # opponent-similarity's grappling/striking-placement axes (see
+    # ude_points_utils.py STYLE_SIMILARITY_AXES): 'sig'/'head'/'body'/'leg'
+    # alone say nothing about whether accuracy came at range, in the clinch,
+    # or on the ground -- e.g. Jailton Almeida and Israel Adesanya could in
+    # principle share an aggregate sig-strike accuracy while doing almost
+    # all of it in entirely different phases.
+    strike_types = ['sig', 'head', 'body', 'leg', 'ground', 'clinch', 'distance']
     new_cols = {f'dynamic_{st}_strikes_accuracy_{f}': [] for st in strike_types for f in ['fighter_1', 'fighter_2']}
     
     cumulative_stats = {st: {} for st in strike_types}
@@ -430,7 +438,8 @@ def add_dynamic_strike_accuracy(df):
     return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
 def add_dynamic_strike_defence(df):
-    strike_types = ['sig', 'head', 'body', 'leg']
+    # Same position/target distinction as add_dynamic_strike_accuracy above.
+    strike_types = ['sig', 'head', 'body', 'leg', 'ground', 'clinch', 'distance']
     new_cols = {f'dynamic_{st}_strikes_defence_{f}': [] for st in strike_types for f in ['fighter_1', 'fighter_2']}
     
     cumulative_defence_stats = {st: {} for st in strike_types}
@@ -454,6 +463,88 @@ def add_dynamic_strike_defence(df):
                 avoided_in_fight = max(0, opp_attempted - opp_landed)
                 cumulative_defence_stats[st][f_url]['faced'] += opp_attempted
                 cumulative_defence_stats[st][f_url]['avoided'] += avoided_in_fight
+
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
+def add_dynamic_strike_position_share(df):
+    """
+    Cumulative running share of a fighter's own significant-strike output
+    that happens in each position -- ground / clinch / distance -- entering
+    each fight. Answers "how much of their game lives here," independent of
+    add_dynamic_{ground,clinch,distance}_strikes_accuracy (how GOOD they are
+    once there) and independent of overall pace: a high-output fighter and a
+    low-output fighter can post the same ground-strike RATE while having very
+    different ground SHARES, and share is what actually separates "spends
+    most of the fight on the ground" from "occasionally ends up there."
+
+    distance_strikes_attempted + clinch_strikes_attempted +
+    ground_strikes_attempted == sig_strikes_attempted exactly on every row of
+    the current dataset (verified directly, 0 discrepancies across both
+    fighter sides) -- these are UFCStats' own mutually-exclusive position
+    breakdown of significant-strike attempts, not an approximation, so the
+    three shares computed here sum to 1.0 (modulo float rounding) whenever
+    all three are present.
+
+    Added alongside add_dynamic_strike_accuracy's new ground/clinch/distance
+    types for opponent-similarity's phase-preference axis (see
+    ude_points_utils.py STYLE_SIMILARITY_AXES).
+    """
+    positions = ['ground', 'clinch', 'distance']
+    new_cols = {f'dynamic_{p}_strikes_share_{f}': [] for p in positions for f in ['fighter_1', 'fighter_2']}
+
+    cumulative_position = {p: {} for p in positions}
+    cumulative_total = {}
+
+    for row in df.itertuples(index=False):
+        for f_col in ['fighter_1', 'fighter_2']:
+            f_url = getattr(row, f'fighter_url_{f_col}')
+            c_total = cumulative_total.get(f_url, 0.0)
+            for p in positions:
+                c_pos = cumulative_position[p].get(f_url, 0.0)
+                share = np.nan if c_total == 0 else round(c_pos / c_total, 3)
+                new_cols[f'dynamic_{p}_strikes_share_{f_col}'].append(share)
+                attempted = getattr(row, f'{p}_strikes_attempted_{f_col}')
+                cumulative_position[p][f_url] = c_pos + (attempted if pd.notna(attempted) else 0)
+            total_attempted = getattr(row, f'sig_strikes_attempted_{f_col}')
+            cumulative_total[f_url] = c_total + (total_attempted if pd.notna(total_attempted) else 0)
+
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
+def add_dynamic_kd_rate(df):
+    """
+    Cumulative running knockdown rate entering each fight: knockdowns scored
+    / head strikes landed so far. Deliberately the SAME formula
+    calculate_striking_power (ude_points_utils.py) already uses for its
+    division-scoped power ranking -- reused here, not reinvented, just
+    reshaped into a per-fighter cumulative pre-fight snapshot (this
+    function's output shape) rather than a shrunk cross-fighter ranking
+    (that function's output shape). Not win-conditioned, matching
+    calculate_striking_power's own reasoning: a knockdown the opponent
+    survives counts exactly as much as one that ends the fight.
+
+    Added for opponent-similarity's power axis (see ude_points_utils.py
+    STYLE_SIMILARITY_AXES) -- distinct from every accuracy/defence/rate/share
+    column above, none of which capture one-shot finishing power.
+    """
+    new_cols = {f'dynamic_kd_rate_{f}': [] for f in ['fighter_1', 'fighter_2']}
+    cumulative_stats = {}
+
+    for row in df.itertuples(index=False):
+        for f_col in ['fighter_1', 'fighter_2']:
+            f_url = getattr(row, f'fighter_url_{f_col}')
+            if f_url not in cumulative_stats:
+                cumulative_stats[f_url] = {'kd': 0, 'head_landed': 0}
+
+            c_kd = cumulative_stats[f_url]['kd']
+            c_head_landed = cumulative_stats[f_url]['head_landed']
+
+            rate = np.nan if c_head_landed == 0 else round(c_kd / c_head_landed, 4)
+            new_cols[f'dynamic_kd_rate_{f_col}'].append(rate)
+
+            kd = getattr(row, f'kd_{f_col}')
+            head_landed = getattr(row, f'head_strikes_landed_{f_col}')
+            cumulative_stats[f_url]['kd'] += (kd if pd.notna(kd) else 0)
+            cumulative_stats[f_url]['head_landed'] += (head_landed if pd.notna(head_landed) else 0)
 
     return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
@@ -594,10 +685,35 @@ def add_dynamic_attempt_rate(df):
     attempted per minute of cage time. dynamic_td_attempt_rate =
     cumulative takedowns attempted per 15 minutes of cage time (matches
     td_landed_per_15_minutes' own scale).
+
+    Extended with four more cumulative rates, same mechanism, added for
+    opponent-similarity's phase-preference and grappling axes (see
+    ude_points_utils.py STYLE_SIMILARITY_AXES):
+    dynamic_ground_strikes_attempt_rate / dynamic_clinch_strikes_attempt_rate
+    / dynamic_distance_strikes_attempt_rate -- same per-minute scale as
+    dynamic_sig_strikes_attempt_rate, but this is volume by POSITION
+    (companion to add_dynamic_strike_position_share's SHARE by position --
+    rate and share answer different questions and neither substitutes for
+    the other: two fighters can post the same ground-strike rate while one
+    does it as part of a high-output, all-phases game and the other does
+    almost nothing else, which only shows up in share, not rate).
+    dynamic_sub_att_rate -- cumulative submission attempts per 15 minutes,
+    an event count over time exactly like dynamic_td_attempt_rate.
+    dynamic_ctrl_time_share -- NOT a rate like the others: ctrl_in_secs is a
+    duration that is itself bounded by the fight's own total time, so
+    per_unit here (1/60) converts cumulative control-seconds into a
+    cumulative FRACTION of total cage time spent controlling (range [0, 1]),
+    not an event frequency -- deliberately different framing from an
+    unbounded event count like takedowns or submission attempts.
     """
     specs = [
         ('sig_strikes_attempted', 'dynamic_sig_strikes_attempt_rate', 1),
         ('td_attempted', 'dynamic_td_attempt_rate', 15),
+        ('ground_strikes_attempted', 'dynamic_ground_strikes_attempt_rate', 1),
+        ('clinch_strikes_attempted', 'dynamic_clinch_strikes_attempt_rate', 1),
+        ('distance_strikes_attempted', 'dynamic_distance_strikes_attempt_rate', 1),
+        ('sub_att', 'dynamic_sub_att_rate', 15),
+        ('ctrl_in_secs', 'dynamic_ctrl_time_share', 1 / 60),
     ]
     new_cols = {f'{out}_{f}': [] for _, out, _ in specs for f in ['fighter_1', 'fighter_2']}
     cumulative_time = {}
@@ -1099,6 +1215,8 @@ def engineer_all_features(
     df = add_dynamic_strike_defence(df)
     df = add_dynamic_td_accuracy(df)
     df = add_dynamic_td_defence(df)
+    df = add_dynamic_strike_position_share(df)
+    df = add_dynamic_kd_rate(df)
 
     # 9. Standing significant strikes (must run before per-minute rates below,
     # which scan df.columns for every *_landed/*_attempted column still
