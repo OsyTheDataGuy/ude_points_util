@@ -558,8 +558,8 @@ def add_dynamic_control_minute_rate(df):
     the whole fight clock": Khabib Nurmagomedov and Jailton Almeida have a
     similar dynamic_ground_strikes_attempt_rate (per total fight-minute:
     3.08 vs. 2.79, entering their respective latest fights), but Khabib's
-    ground_strikes_per_control_minute (5.54) is ~60% higher than
-    Almeida's (3.51) -- despite Almeida having the far higher overall
+    ground_strikes_per_control_minute (4.96) is ~46% higher than
+    Almeida's (3.40) -- despite Almeida having the far higher overall
     ground SHARE (0.80 vs. 0.38). Read together with
     dynamic_ctrl_time_share (Almeida's is the higher of the two, 0.79 vs.
     0.56) and dynamic_sub_att_rate (also higher for Almeida), the shape
@@ -588,48 +588,61 @@ def add_dynamic_control_minute_rate(df):
     dynamic_sub_attempts_per_control_minute = cumulative submission
     attempts / cumulative minutes of own control time.
 
-    Both NaN before a fighter has any control time on record -- division
-    by zero avoided the same way as every other dynamic_* rate/accuracy
-    column in this file: NaN, not 0.0, so a similarity comparison drops
-    the column from its mean instead of reading "no data yet" as a
-    genuine zero rate.
+    True-zero (a fighter with genuinely no control time on record at all --
+    e.g. entering their first-ever fight) still gets NaN, matching every
+    other dynamic_* rate/accuracy column's zero-denominator convention.
+    Anything above true zero is Bayesian-shrunk toward the population's own
+    pooled rate via ude_points_utils._shrink_rate -- the same mechanism
+    already used for potency/power/durability elsewhere in this project --
+    rather than left as a raw, unstable ratio below an arbitrary cutoff.
 
-    MIN_CONTROL_MINUTES_FOR_RATE floor: below this much cumulative control
-    time, both columns are NaN rather than an unstable ratio. Found for
-    real, not assumed: Alex Pereira's dynamic_ground_strikes_per_control_minute
-    reached 30.000 (an order of magnitude above every other fighter
-    checked in a 7-fighter spot check) on a total career control base of
-    only 2.6 minutes across 13 fights -- a denominator that thin makes the
-    ratio swing wildly on a handful of incidental attempts (his own value
-    climbed 2.1 -> 30.0 as his career progressed). Checked the full
-    population (17,208 fighter-fight observations) before picking the
-    floor rather than guessing: binned by cumulative control-minutes
-    entering the fight, the max/p95 of the stored rate shrinks from
-    540/97 under 1 minute to 27/15 at 3-5 minutes to 15/7 at 20+ minutes
-    -- the tail never fully flattens (no floor eliminates every extreme
-    case), so 5.0 was picked as the point that comfortably excludes
-    Pereira's entire career (his max was 2.6) and cuts the worst of the
-    tail, while excluding "only" ~31% of nonzero observations rather than
-    the ~49% a 10-minute floor would. A real tradeoff, disclosed, not a
-    complete fix -- see data_dictionary.md.
+    Replaced a hard MIN_CONTROL_MINUTES_FOR_RATE=5.0 floor (2026-09) after
+    it turned out to trade one problem for a worse one: it hid the
+    instability (NaN below 5 minutes) but did nothing for a fighter just
+    above it, and produced a sharp discontinuity at the cutoff itself.
+    Found for real, not assumed: Alex Pereira's
+    dynamic_ground_strikes_per_control_minute reached 30.000 (an order of
+    magnitude above every other fighter checked) on a career control base
+    of only 2.6 minutes across 13 fights. Shrinkage fixes this smoothly
+    instead: CONTROL_MINUTE_RATE_PRIOR_STRENGTH=30 (~3x the population's
+    median cumulative-control-minutes of ~10.3, the same "~3x typical"
+    convention DURABILITY_SHRINKAGE_PRIOR_STRENGTH already uses) pulls
+    Pereira's 30.000 to 5.30 and his sub-attempt rate from 0.769 to 0.215,
+    while barely moving fighters with a real evidence base (Khabib's
+    ground rate: 5.540 -> 4.963; Almeida's sub-attempt rate, on 62.65
+    minutes of control: 0.1596 -> 0.1618). Also handles literal zero
+    control-minutes gracefully for free, with no special-casing needed:
+    _shrink_rate(0, 0, prior_strength, prior_rate) reduces algebraically
+    to exactly prior_rate.
+
+    Prior rates -- pooled (total events / total exposure summed once per
+    fighter, matching calculate_striking_power's own division_kd_rate
+    convention, not a mean of per-fight cumulative snapshots, which is a
+    different and wrong quantity found and discarded while deriving this):
+    ground_strikes_per_control_minute prior_rate=3.1598,
+    sub_attempts_per_control_minute prior_rate=0.1665.
     """
-    MIN_CONTROL_MINUTES_FOR_RATE = 5.0
+    from ude_points_utils import _shrink_rate
 
+    CONTROL_MINUTE_RATE_PRIOR_STRENGTH = 30.0
     specs = [
-        ('ground_strikes_attempted', 'dynamic_ground_strikes_per_control_minute'),
-        ('sub_att', 'dynamic_sub_attempts_per_control_minute'),
+        ('ground_strikes_attempted', 'dynamic_ground_strikes_per_control_minute', 3.1598),
+        ('sub_att', 'dynamic_sub_attempts_per_control_minute', 0.1665),
     ]
-    new_cols = {f'{out}_{f}': [] for _, out in specs for f in ['fighter_1', 'fighter_2']}
+    new_cols = {f'{out}_{f}': [] for _, out, _ in specs for f in ['fighter_1', 'fighter_2']}
     cumulative_ctrl_mins = {}
-    cumulative_count = {stat: {} for stat, _ in specs}
+    cumulative_count = {stat: {} for stat, _, _ in specs}
 
     for row in df.itertuples(index=False):
         for f_col in ['fighter_1', 'fighter_2']:
             f_url = getattr(row, f'fighter_url_{f_col}')
             c_ctrl = cumulative_ctrl_mins.get(f_url, 0.0)
-            for stat, out in specs:
+            for stat, out, prior_rate in specs:
                 c_count = cumulative_count[stat].get(f_url, 0.0)
-                rate = np.nan if c_ctrl < MIN_CONTROL_MINUTES_FOR_RATE else round(c_count / c_ctrl, 3)
+                if c_ctrl == 0:
+                    rate = np.nan
+                else:
+                    rate = round(_shrink_rate(c_count, c_ctrl, CONTROL_MINUTE_RATE_PRIOR_STRENGTH, prior_rate), 3)
                 new_cols[f'{out}_{f_col}'].append(rate)
                 count = getattr(row, f'{stat}_{f_col}')
                 cumulative_count[stat][f_url] = c_count + (count if pd.notna(count) else 0)
