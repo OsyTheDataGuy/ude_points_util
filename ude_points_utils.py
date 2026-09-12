@@ -1925,6 +1925,35 @@ def generate_fighter_profile(df, fighter_name, as_of=None):
     throughout this project (see mma_content_strategy.md's data-sourcing
     rules). df without a Stance column (e.g. plain v2_6.csv) still works;
     the profile's 'Stance' value is just None in that case.
+
+    Two extra diagnostic fields, *_max_fight_share, flag when a
+    per-control-minute rate's cumulative numerator is dominated by a
+    single fight rather than built up across a career -- shrinkage
+    (add_dynamic_control_minute_rate) already protects against a THIN
+    total exposure, but not against exposure that's real in aggregate yet
+    concentrated in one outlier bout. Found for real: Petr Yan's
+    dynamic_ground_strikes_per_control_minute is a plausible-looking 4.752
+    entering his 2025-12-06 fight vs. Merab Dvalishvili, but 97 of the 235
+    ground strikes behind it (41%) came from a single fight, his 2020-07-11
+    TKO of Jose Aldo -- a share this field surfaces as
+    ground_strikes_per_control_minute_max_fight_share=0.413, so a
+    downstream consumer can judge whether the number reflects a sustained
+    pattern or one outlier performance, rather than trusting the rate
+    blind. NaN when there's no fight history yet (a fighter's own debut),
+    matching every other dynamic_* column's zero-denominator convention.
+
+    Also NaN below MAX_FIGHT_SHARE_MIN_EVENTS=5 total career events of that
+    type -- below that, the share isn't measuring concentration at all,
+    it's arithmetic (a total of 1 forces share=1.0; a total of 2 forces
+    share>=0.5). Checked against the real distribution across 2,565
+    fighters: sub_att is the case this matters for -- median career total
+    entering a fighter's latest fight is only 1, and 83% of fighters
+    (2,131/2,565) have a total below 5, so
+    sub_attempts_per_control_minute_max_fight_share is NaN for most of the
+    roster by design, not by bug -- sub attempts are rare enough that
+    "which fight dominated my sub attempts" is genuinely unanswerable for
+    most fighters. ground_strikes_attempted doesn't have this problem
+    (median 16; only 36% fall below 5).
     """
     if as_of is not None:
         df = df[pd.to_datetime(df['event_date']) < pd.to_datetime(as_of)]
@@ -1934,7 +1963,9 @@ def generate_fighter_profile(df, fighter_name, as_of=None):
         raise ValueError(f"No fights found for fighter '{fighter_name}'"
                          + (f" before {pd.to_datetime(as_of).date()}" if as_of is not None else ""))
 
-    latest = career.sort_values(by='event_date', ascending=False).iloc[0]
+    career = career.sort_values(by='event_date', ascending=False)
+    latest = career.iloc[0]
+    history = career.iloc[1:]
     profile = {'fighter': fighter_name, 'fighter_url': latest['fighter_url'],
                'Stance': latest.get('Stance'),
                # The division this fight is/was actually in -- used by
@@ -1946,6 +1977,15 @@ def generate_fighter_profile(df, fighter_name, as_of=None):
                'weight_class_cleaned': latest.get('weight_class_cleaned')}
     for col in PHYSICAL_SIMILARITY_COLUMNS + STYLE_SIMILARITY_COLUMNS:
         profile[col] = latest.get(col)
+
+    MAX_FIGHT_SHARE_MIN_EVENTS = 5
+    for numerator_col, out_col in [
+        ('ground_strikes_attempted', 'ground_strikes_per_control_minute_max_fight_share'),
+        ('sub_att', 'sub_attempts_per_control_minute_max_fight_share'),
+    ]:
+        total = history[numerator_col].sum()
+        profile[out_col] = (round(history[numerator_col].max() / total, 3)
+                             if total >= MAX_FIGHT_SHARE_MIN_EVENTS else np.nan)
 
     return pd.DataFrame([profile])
 
@@ -2075,6 +2115,178 @@ def _compute_robust_scale_reference(df, columns, weight_class=None,
             # of trusting an unstable small sample or dividing by zero.
             scale_ref[c] = promo_scale[c]
     return scale_ref
+
+
+def _compute_robust_center_scale_reference(df, columns, weight_class=None,
+                                            min_division_observations=MIN_DIVISION_OBSERVATIONS_FOR_SCALING):
+    """
+    {column: (median, scale)} -- same division-scoped-with-promotion-wide-
+    fallback logic as _compute_robust_scale_reference (division median/MAD
+    when the division has >= min_division_observations non-null values and
+    a non-degenerate scale, promotion-wide otherwise), but also returns the
+    median. _compute_robust_scale_reference only returns scale because its
+    one caller (calculate_similarity_differences) scales a DIFFERENCE
+    between two fighters' raw values -- it never needs a center. Classifying
+    one fighter's raw value as high/low/typical needs both, hence this
+    sibling rather than changing that function's return shape and risking
+    its existing caller.
+    """
+    long = _build_population_long_table(df, columns)
+
+    promo_ref = {}
+    for c in columns:
+        promo_ref[c] = _median_mad_scale(long[c])[:2]
+
+    if weight_class is None or pd.isna(weight_class):
+        return promo_ref
+
+    div_long = long[long['weight_class_cleaned'] == weight_class]
+    ref = {}
+    for c in columns:
+        med, scale, n = _median_mad_scale(div_long[c])
+        if n >= min_division_observations and pd.notna(scale):
+            ref[c] = (med, scale)
+        else:
+            ref[c] = promo_ref[c]
+    return ref
+
+
+ARCHETYPE_Z_COLUMNS = [
+    'dynamic_ground_strikes_share', 'dynamic_ctrl_time_share',
+    'dynamic_td_accuracy', 'dynamic_td_attempt_rate',
+    'dynamic_ground_strikes_per_control_minute', 'dynamic_sub_attempts_per_control_minute',
+]
+
+
+def classify_fighter_archetype(df, fighter_name, as_of=None):
+    """
+    Two continuous, division-scoped robust-z composite scores describing a
+    fighter's grappling style -- built from generate_fighter_profile's
+    dynamic_* snapshot, reusing the exact same S4 scaling machinery
+    (_build_population_long_table / _median_mad_scale, division-scoped with
+    the MIN_DIVISION_OBSERVATIONS_FOR_SCALING promotion-wide fallback) that
+    calculate_similarity_differences already uses, not a new statistic.
+
+    grappling_orientation: how much of this fighter's game is spent
+    imposing grappling at all (share of strikes on the ground, share of
+    the fight spent in control, takedown accuracy and attempt rate) vs.
+    staying largely on the feet. Built hierarchically, not as a flat
+    5-column average: dynamic_ground_strikes_share and dynamic_ctrl_time_share
+    are correlated (r=0.69 in this dataset, both just describe "how much
+    ground time"), so they're first averaged into one grappling_dominance
+    sub-score, THEN averaged with td_accuracy and td_attempt_rate (each
+    only r=0.28-0.30 with grappling_dominance, r=-0.07 to each other) --
+    a flat average would silently double-count the ground/control-time
+    pair against the other two.
+
+    ground_game_style: once grappling is happening, whether that time is
+    spent hunting a finish (positive dynamic_sub_attempts_per_control_minute
+    contribution) or piling up volume strikes (positive
+    dynamic_ground_strikes_per_control_minute contribution) --
+    z(ground_strikes_per_control_minute) - z(sub_attempts_per_control_minute).
+    Near zero means genuinely balanced between the two, not "no data" (see
+    ground_strikes_per_control_minute_max_fight_share /
+    sub_attempts_per_control_minute_max_fight_share on the returned profile
+    for whether either input rate itself rests on a thin or single-fight-
+    concentrated evidence base before trusting this score).
+
+    Verified against the pre-registered roster: Khabib Nurmagomedov
+    (fighter_url=032cc3922d871c7f, LW) grappling_orientation=1.65,
+    ground_game_style=4.96 -- high orientation, strongly positive style,
+    ground-and-pound. Islam Makhachev (fighter_url=275aca31f61ba28c, WW)
+    0.84 / -1.83 -- moderate orientation, strongly negative style,
+    control-sub. Jailton Almeida (fighter_url=41e83a89929d1327, HW) 2.88 /
+    0.01 -- highest orientation of the seven, but style dead-center:
+    balanced/hybrid on the ground rather than leaning either way, not an
+    unresolved case. Israel Adesanya (fighter_url=1338e2c7480bdf9e, MW)
+    -1.14 / -0.13 and Michael Page (fighter_url=a67d071163962af8, MW)
+    -1.24 / -0.27 -- strongly negative orientation, pure strikers. Jon
+    Jones (fighter_url=07f72a2a7591b409, HW) 0.41 / 1.52 and Petr Yan
+    (fighter_url=d661ce4da776fc20, BW) 0.25 / 4.73 -- low-moderate
+    orientation, "well-rounded, mostly feet" region; Yan's high style
+    score should be read alongside his
+    ground_strikes_per_control_minute_max_fight_share=0.413 -- 41% of his
+    career ground-strike volume entering that snapshot came from a single
+    fight (his 2020-07-11 TKO of Jose Aldo), so it reflects one dominant
+    performance more than a sustained pattern.
+
+    archetype_label buckets the two scores using terciles (30th/70th
+    percentile) of this SAME function's output, run once across every
+    fighter with >=8 career fights (793 fighters) -- restricted to that
+    subpopulation because ground_game_style's spread grows sharply with
+    career length (share with |ground_game_style|>3 goes from 2.5% at 3-4
+    fights to 24.3% at 13+), which is shrinkage correctly letting fighters
+    with real evidence diverge from the prior, not noise -- but it means
+    cut-points from the WHOLE population would be dominated by
+    inexperienced fighters clustered near the shrinkage prior rather than
+    by fighters whose ground game has actually shown itself. Both
+    distributions are unimodal with no natural gap between clusters (MMA
+    styles form a spectrum here, not discrete groups) -- these percentile
+    cut-points are a disclosed convention, not a discovered boundary:
+    ARCHETYPE_ORIENTATION_STRIKER_PCT30=-0.243, _GRAPPLER_PCT70=0.372,
+    ARCHETYPE_STYLE_CONTROL_SUB_PCT30=-0.912, _GROUND_AND_POUND_PCT70=1.273.
+
+    Labels, applied hierarchically (style only distinguishes fighters who
+    are grappling in the first place): orientation<=-0.243 -> "primarily a
+    striker" (style not considered); orientation>=0.372 -> grappler, then
+    by style: <=-0.912 "control/submission-leaning grappler", >=1.273
+    "ground-and-pound-leaning grappler", between "balanced on the ground";
+    otherwise "well-rounded". None when grappling_orientation is NaN (no
+    scoreable style data at all).
+    """
+    df_scoped = df
+    if as_of is not None:
+        df_scoped = df[pd.to_datetime(df['event_date']) < pd.to_datetime(as_of)]
+
+    profile = generate_fighter_profile(df_scoped, fighter_name)
+    weight_class = profile['weight_class_cleaned'].values[0]
+    ref = _compute_robust_center_scale_reference(df_scoped, ARCHETYPE_Z_COLUMNS, weight_class)
+
+    def z(col):
+        val = profile[col].values[0]
+        med, scale = ref[col]
+        if pd.isna(val) or pd.isna(scale):
+            return np.nan
+        return (val - med) / scale
+
+    grappling_dominance = np.nanmean([z('dynamic_ground_strikes_share'), z('dynamic_ctrl_time_share')])
+    orientation = round(np.nanmean(
+        [grappling_dominance, z('dynamic_td_accuracy'), z('dynamic_td_attempt_rate')]), 3)
+    style = round(
+        z('dynamic_ground_strikes_per_control_minute') - z('dynamic_sub_attempts_per_control_minute'), 3)
+    profile['grappling_orientation'] = orientation
+    profile['ground_game_style'] = style
+    profile['archetype_label'] = _archetype_label(orientation, style)
+
+    return profile[['fighter', 'fighter_url', 'weight_class_cleaned',
+                     'grappling_orientation', 'ground_game_style', 'archetype_label',
+                     'ground_strikes_per_control_minute_max_fight_share',
+                     'sub_attempts_per_control_minute_max_fight_share']]
+
+
+ARCHETYPE_ORIENTATION_STRIKER_PCT30 = -0.243
+ARCHETYPE_ORIENTATION_GRAPPLER_PCT70 = 0.372
+ARCHETYPE_STYLE_CONTROL_SUB_PCT30 = -0.912
+ARCHETYPE_STYLE_GROUND_AND_POUND_PCT70 = 1.273
+
+
+def _archetype_label(orientation, style):
+    """See classify_fighter_archetype's docstring for how these cut-points
+    were derived and why hierarchically (style only means something once a
+    fighter is grappling at all)."""
+    if pd.isna(orientation):
+        return None
+    if orientation <= ARCHETYPE_ORIENTATION_STRIKER_PCT30:
+        return 'primarily a striker'
+    if orientation >= ARCHETYPE_ORIENTATION_GRAPPLER_PCT70:
+        if pd.isna(style):
+            return 'grappling-oriented (ground style undetermined)'
+        if style <= ARCHETYPE_STYLE_CONTROL_SUB_PCT30:
+            return 'control/submission-leaning grappler'
+        if style >= ARCHETYPE_STYLE_GROUND_AND_POUND_PCT70:
+            return 'ground-and-pound-leaning grappler'
+        return 'balanced on the ground'
+    return 'well-rounded'
 
 
 def calculate_similarity_differences(df, future_profile, career_dataset, columns_to_compare, min_columns=None,
