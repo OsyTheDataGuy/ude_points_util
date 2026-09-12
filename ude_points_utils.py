@@ -1841,6 +1841,21 @@ STYLE_SIMILARITY_AXES = {
         'dynamic_td_accuracy', 'dynamic_td_defence',
         'dynamic_ctrl_time_share', 'dynamic_sub_att_rate',
         'dynamic_ground_strikes_accuracy', 'dynamic_ground_strikes_defence',
+        # Rate of output PER MINUTE OF CONTROL, not per minute of total
+        # fight time (dynamic_ground_strikes_attempt_rate/dynamic_sub_att_rate
+        # above already cover the latter) -- "how busy once he actually has
+        # someone controlled" is a different question from "how much
+        # output relative to the whole fight," and the two can disagree:
+        # Khabib and Almeida have similar total-fight-time ground rates
+        # (3.08 vs. 2.79) despite Almeida's much higher ground SHARE (0.80
+        # vs. 0.38), but Khabib's ground-strikes-per-control-minute (5.54)
+        # is ~60% higher than Almeida's (3.51) -- a real busier-once-on-top
+        # vs. holds-longer-and-works-patiently distinction neither share
+        # nor the total-time rate surfaces on its own. See
+        # add_dynamic_control_minute_rate's docstring for the caveat: the
+        # numerator isn't strictly "while in control" (a strike/attempt
+        # can happen from the bottom or mid-scramble).
+        'dynamic_ground_strikes_per_control_minute', 'dynamic_sub_attempts_per_control_minute',
     ],
 }
 STYLE_SIMILARITY_COLUMNS = [col for cols in STYLE_SIMILARITY_AXES.values() for col in cols]
