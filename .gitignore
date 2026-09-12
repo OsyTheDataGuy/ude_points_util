@@ -40,3 +40,7 @@ dataset refresh 2026_09_08 report.md
 # created, not after the fact.
 similarity_and_power_improvement_plan.md
 style_axes_story_test_report.md
+
+# Claude Code local settings (attribution.commit/.pr disabled here) --
+# machine-specific, never pushed.
+.claude/settings.local.json
