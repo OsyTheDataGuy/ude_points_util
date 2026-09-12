@@ -23,8 +23,35 @@ def create_fighter_career_dataset(df, fighter_name):
 
     Returns:
     - pd.DataFrame: A new dataset containing the career details of the fighter.
+      Empty (0 rows) if fighter_name has no fights in df -- this isn't only
+      "the fighter doesn't exist": df is frequently a pre-as_of-filtered
+      subset (see generate_fighter_profile), and a fighter's own UFC debut
+      is on or after that as_of date on every such call, correctly, by
+      definition. Guarded explicitly (see below) rather than left to fail
+      naturally, because it didn't fail naturally -- see that guard's
+      comment for what actually happened before this existed.
     """
     fighter_fights = filter_fighter_fights(df, fighter_name)
+    if fighter_fights.empty:
+        # extract_fighter_details_programmatically builds its output via
+        # df.apply(..., result_type='expand') -- which never runs the
+        # lambda at all on a 0-row input, so pandas has nothing to infer
+        # the target columns from and hands back fighter_fights' own
+        # UNPROCESSED columns (still 'Height (m)_fighter_1', never
+        # renamed to the plain 'Height (m)' the rest of this chain
+        # expects) instead of an empty frame shaped like a real result.
+        # create_diff_columns then reads for a column that was never
+        # created and throws a KeyError -- confusing, and one level
+        # removed from the actual problem. Found for real: calling
+        # generate_fighter_profile(df, 'Arman Tsarukyan', as_of='2019-04-20')
+        # (his actual UFC debut date) crashed exactly this way instead of
+        # raising the clean, documented "no fights found" ValueError that
+        # function's own docstring promises -- that ValueError checks
+        # THIS function's return value, which never arrived, because this
+        # function died first. Returning the empty frame immediately,
+        # before any of that broken machinery runs, is what lets that
+        # existing check actually fire as designed.
+        return fighter_fights
     fighter_details = extract_fighter_details_programmatically(fighter_fights, fighter_name)
     opponent_details = extract_opponent_details_programmatically(fighter_fights, fighter_name)
     final_dataset = reorganize_fight_data_programmatically(fighter_fights, fighter_details, opponent_details)
