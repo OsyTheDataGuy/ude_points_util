@@ -40,3 +40,7 @@ dataset refresh 2026_09_08 report.md
 # committed/pushed before that rule was stated explicitly; un-tracked here.
 similarity_and_power_improvement_plan.md
 style_axes_story_test_report.md
+
+# Claude Code local settings (attribution.commit/.pr disabled here) --
+# machine-specific, never pushed.
+.claude/settings.local.json
