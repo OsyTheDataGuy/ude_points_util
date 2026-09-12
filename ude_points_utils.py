@@ -1841,6 +1841,21 @@ STYLE_SIMILARITY_AXES = {
         'dynamic_td_accuracy', 'dynamic_td_defence',
         'dynamic_ctrl_time_share', 'dynamic_sub_att_rate',
         'dynamic_ground_strikes_accuracy', 'dynamic_ground_strikes_defence',
+        # Rate of output PER MINUTE OF CONTROL, not per minute of total
+        # fight time (dynamic_ground_strikes_attempt_rate/dynamic_sub_att_rate
+        # above already cover the latter) -- "how busy once he actually has
+        # someone controlled" is a different question from "how much
+        # output relative to the whole fight," and the two can disagree:
+        # Khabib and Almeida have similar total-fight-time ground rates
+        # (3.08 vs. 2.79) despite Almeida's much higher ground SHARE (0.80
+        # vs. 0.38), but Khabib's ground-strikes-per-control-minute (5.54)
+        # is ~60% higher than Almeida's (3.51) -- a real busier-once-on-top
+        # vs. holds-longer-and-works-patiently distinction neither share
+        # nor the total-time rate surfaces on its own. See
+        # add_dynamic_control_minute_rate's docstring for the caveat: the
+        # numerator isn't strictly "while in control" (a strike/attempt
+        # can happen from the bottom or mid-scramble).
+        'dynamic_ground_strikes_per_control_minute', 'dynamic_sub_attempts_per_control_minute',
     ],
 }
 STYLE_SIMILARITY_COLUMNS = [col for cols in STYLE_SIMILARITY_AXES.values() for col in cols]
@@ -1894,7 +1909,14 @@ def generate_fighter_profile(df, fighter_name, as_of=None):
 
     latest = career.sort_values(by='event_date', ascending=False).iloc[0]
     profile = {'fighter': fighter_name, 'fighter_url': latest['fighter_url'],
-               'Stance': latest.get('Stance')}
+               'Stance': latest.get('Stance'),
+               # The division this fight is/was actually in -- used by
+               # calculate_similarity_differences to scale comparisons
+               # against this division's own population rather than a
+               # per-call min-max over a handful of candidates (see its
+               # docstring). Not part of PHYSICAL/STYLE_SIMILARITY_COLUMNS:
+               # it's the scaling CONTEXT, not a compared dimension itself.
+               'weight_class_cleaned': latest.get('weight_class_cleaned')}
     for col in PHYSICAL_SIMILARITY_COLUMNS + STYLE_SIMILARITY_COLUMNS:
         profile[col] = latest.get(col)
 
@@ -1911,13 +1933,144 @@ def _stance_match_label(future_stance, past_stance):
     return 'same' if future_stance == past_stance else 'different'
 
 
-def calculate_similarity_differences(future_profile, career_dataset, columns_to_compare, min_columns=None,
-                                      axis_map=None):
+# age's raw source is 'fight_day_age (yrs)_fighter_1'/'_2' (same special
+# case extract_fighter_details_programmatically already carries) -- every
+# other comparison column's own name already matches its _fighter_1/_2
+# source column exactly.
+_SIMILARITY_RAW_COLUMN_NAME = {'age': 'fight_day_age (yrs)'}
+
+MIN_DIVISION_OBSERVATIONS_FOR_SCALING = 300
+
+
+def _build_population_long_table(df, columns):
+    """
+    One row per fighter per fight (both sides melted together), carrying
+    weight_class_cleaned and each of `columns`' raw value for that side --
+    the population calculate_similarity_differences scales comparisons
+    against. Deliberately NOT a call to create_fighter_career_dataset:
+    that function builds one named fighter's career, row-wise via
+    .apply(), which is the right shape for a single fighter's history but
+    the wrong one here -- this needs every fighter's fights at once, and
+    row-wise apply across the whole roster for a stat that's recomputed
+    per similarity call would be needlessly slow. Kept as a small,
+    separate vectorized melt instead.
+    """
+    frames = []
+    for side in ('fighter_1', 'fighter_2'):
+        src_cols = [f"{_SIMILARITY_RAW_COLUMN_NAME.get(c, c)}_{side}" for c in columns]
+        sub = df[['weight_class_cleaned'] + src_cols].copy()
+        sub.columns = ['weight_class_cleaned'] + list(columns)
+        frames.append(sub)
+    return pd.concat(frames, ignore_index=True)
+
+
+def _median_mad_scale(series):
+    """Median and a normal-equivalent robust scale (1.4826 * MAD) for one
+    column's non-null values. Returns (median, scale, n) with scale=NaN if
+    there's no data or the column is degenerate (every value identical)."""
+    s = series.dropna()
+    if len(s) == 0:
+        return np.nan, np.nan, 0
+    med = s.median()
+    mad = (s - med).abs().median() * 1.4826
+    return med, (mad if mad > 0 else np.nan), len(s)
+
+
+def _compute_robust_scale_reference(df, columns, weight_class=None,
+                                     min_division_observations=MIN_DIVISION_OBSERVATIONS_FOR_SCALING):
+    """
+    {column: scale} for calculate_similarity_differences -- scale is
+    1.4826 * MAD (median absolute deviation), the standard factor that
+    makes MAD comparable to a normal distribution's standard deviation, so
+    every column ends up on the same "spread units from center" footing
+    regardless of its shape.
+
+    Why robust (median/MAD), not a plain mean/SD z-score: checked skew and
+    outlier rate across all 28 comparison columns before deciding, rather
+    than guessing. Physical columns are clean (age/height/reach: |skew| <
+    0.3, <1% outliers by the 1.5xIQR rule) but most style columns are not
+    -- dynamic_kd_rate has skew 13.3 (a classic rare-event long tail;
+    plain SD is 0.0363 vs. the robust estimate's 0.0104, more than 3x
+    larger and pulled by the tail), and several usage columns skew 3-6.
+    Using ONE method uniformly -- rather than z-score for the clean
+    columns and robust for the skewed ones -- avoids reintroducing a
+    mixed-footing average across columns (the exact problem the per-call
+    min-max scaling this replaces was already causing). Verified this
+    costs nothing on the clean columns: age's plain SD (4.14) and its
+    robust estimate (4.21) are functionally identical.
+
+    weight_class: if given, each column's median/scale is computed from
+    fighter-fight observations in THAT division only, falling back to the
+    promotion-wide value when the division has fewer than
+    min_division_observations non-null values for that column, or when
+    the division's scale is degenerate (found for real: dynamic_kd_rate in
+    three lighter/lower-power divisions, dynamic_sub_att_rate in HW, where
+    most fighters share the same near-zero rate for that stat). None
+    (default) -> promotion-wide for every column.
+
+    Checked per-column SD by division vs. promotion-wide across all 28
+    columns before deciding division-scoping was worth doing at all:
+    physical measures barely differ by division (1.25-1.53x spread across
+    divisions) -- the "flyweight vs. heavyweight" intuition doesn't show up
+    in within-division SPREAD, only in the mean -- but dynamic_kd_rate
+    differs 7.35x (heavyweight power variance dwarfs bantamweight's) and
+    several grappling-usage columns differ ~2x. Scoping uniformly costs
+    nothing where it doesn't matter and fixes real distortion where it
+    does, rather than special-casing which columns get it.
+
+    Computed fresh from `df` as passed in, every call -- if the caller has
+    already filtered to as_of, this reference reflects the population as
+    of that date too, with no separate temporal-scoping logic needed here
+    (mirrors generate_fighter_profile's own as_of handling). Never cache
+    or precompute this globally: doing so would leak future population
+    data into a retrospective/backtest call exactly the way S3 (see
+    data_dictionary.md) leaked future opponent stats before as_of existed.
+    """
+    long = _build_population_long_table(df, columns)
+
+    promo_scale = {}
+    for c in columns:
+        _, scale, _ = _median_mad_scale(long[c])
+        promo_scale[c] = scale
+
+    if weight_class is None or pd.isna(weight_class):
+        return promo_scale
+
+    div_long = long[long['weight_class_cleaned'] == weight_class]
+    scale_ref = {}
+    for c in columns:
+        _, div_scale, n = _median_mad_scale(div_long[c])
+        if n >= min_division_observations and pd.notna(div_scale):
+            scale_ref[c] = div_scale
+        else:
+            # Too few division observations for a stable estimate, or a
+            # degenerate (zero-spread) division -- promotion-wide instead
+            # of trusting an unstable small sample or dividing by zero.
+            scale_ref[c] = promo_scale[c]
+    return scale_ref
+
+
+def calculate_similarity_differences(df, future_profile, career_dataset, columns_to_compare, min_columns=None,
+                                      axis_map=None, weight_class=None,
+                                      min_division_observations=MIN_DIVISION_OBSERVATIONS_FOR_SCALING):
     """
     Signed, SCALED differences between a future opponent's profile and
     each of a fighter's past opponents (from create_fighter_career_dataset's
     opponent_* columns), summed into one total_difference per past
     opponent and sorted smallest-first (most similar first).
+
+    df: the source dataset -- used ONLY to compute the population scaling
+    reference (see _compute_robust_scale_reference), not re-filtered or
+    re-joined here. Pass the same (as_of-filtered, if applicable) df the
+    caller built future_profile/career_dataset from.
+
+    weight_class: if given, comparisons are scaled against THAT division's
+    own population (falling back to promotion-wide below
+    min_division_observations non-null values, or on a degenerate
+    division) instead of promotion-wide for everything. find_most_similar_past_opponents
+    passes the future opponent's own division here, since that's the
+    relevant context: "how similar is this, by the standards of the fight
+    actually being prepped for."
 
     axis_map: optional {axis_name: [columns]} (e.g. STYLE_SIMILARITY_AXES)
     to additionally report a per-axis mean |diff| (axis_<name>_difference)
@@ -1962,9 +2115,23 @@ def calculate_similarity_differences(future_profile, career_dataset, columns_to_
     counts and 60-90 inches of reach), so whichever column happened to
     have the largest raw numeric range dominated total_difference
     regardless of how meaningful the gap actually was. Each compared
-    column is min-max scaled to [0, 1] here -- using the combined range of
-    the past-opponent population AND the future opponent -- before
-    differencing, so every column contributes comparably.
+    column is scaled by a robust population-referenced spread (see
+    _compute_robust_scale_reference) before differencing, so every column
+    contributes comparably.
+
+    This scaling was originally a per-call min-max over just
+    {this fighter's own past opponents} U {the future opponent} -- a set
+    of maybe 5-20 values. Replaced (2026-09) because that made scores
+    incomparable across different find_most_similar_past_opponents calls,
+    let one outlier candidate shift every other score by double-digit
+    percent (removing one candidate from a real call moved every other
+    score up to 30% and reordered 8 of 19 ranks), and produced degenerate
+    0/1 scores for a fighter with only 2-3 past opponents. Scaling against
+    a stable, population-sized reference instead (division-scoped where
+    there's enough data, promotion-wide otherwise) fixes all three: scores
+    from different calls are on the same footing, one candidate can't move
+    another's score, and even a 1-past-opponent career gets a well-defined
+    scale to compare against.
 
     Separately, the notebook's default column selector used lowercase
     keyword substrings ('height', 'reach') against columns actually named
@@ -1990,6 +2157,9 @@ def calculate_similarity_differences(future_profile, career_dataset, columns_to_
         min_columns = len(columns_to_compare) if len(columns_to_compare) <= 3 \
             else len(columns_to_compare) - 1
 
+    scale_reference = _compute_robust_scale_reference(df, columns_to_compare, weight_class,
+                                                        min_division_observations)
+
     result = career_dataset[['opponent', 'opponent_fighter_url']].copy()
     if 'event_date' in career_dataset.columns:
         # The date fighter actually met this past opponent -- makes a
@@ -2013,22 +2183,24 @@ def calculate_similarity_differences(future_profile, career_dataset, columns_to_
         future_value = future_profile[column].values[0]
         past_values = career_dataset[career_column]
 
-        combined = pd.concat([past_values, pd.Series([future_value])], ignore_index=True)
-        col_min, col_max = combined.min(), combined.max()
-        col_range = col_max - col_min
+        scale = scale_reference.get(column)
 
-        if pd.isna(col_range) or col_range == 0:
-            # Every value on this dimension (including the future
-            # opponent's) is identical or missing -- no discriminating
-            # information here. Emit NaN, not 0.0: a 0.0 fed into the
-            # skipna=True mean below reads as PERFECT agreement on this
-            # column and drags total_difference toward a false top rank
-            # (exactly the "neutral state resolving to a boundary value"
-            # bug class in data_integrity_and_invariants.md). NaN genuinely
-            # drops the column from the row's mean instead.
+        if scale is None or pd.isna(scale) or scale == 0 or pd.isna(future_value):
+            # No usable population-wide spread estimate for this column
+            # (shouldn't happen with real data -- promotion-wide has
+            # thousands of observations for every column -- but guarded
+            # the same way a zero-range column used to be: NaN, not 0.0,
+            # so it drops out of the mean below instead of reading as a
+            # perfect match), OR the future opponent's own value is
+            # missing, in which case there's nothing to difference
+            # against regardless of how well-estimated the scale is.
             scaled_diff = pd.Series(np.nan, index=career_dataset.index)
         else:
-            scaled_diff = (past_values - col_min) / col_range - (future_value - col_min) / col_range
+            # The scale's center (median) cancels out of a plain
+            # difference between two values -- only the SPREAD matters
+            # for how far apart they are relative to what's typical, so
+            # there's no need to track or subtract the median here.
+            scaled_diff = (past_values - future_value) / scale
 
         result[f'diff_{column}'] = scaled_diff.values
         abs_diffs[column] = scaled_diff.abs()
@@ -2061,12 +2233,15 @@ def calculate_similarity_differences(future_profile, career_dataset, columns_to_
     return result.sort_values(by='total_difference').reset_index(drop=True)
 
 
-def calculate_physical_similarity(future_profile, career_dataset, min_columns=None):
-    """Physical-similarity ranking (age, height, reach) of a fighter's past opponents against a future opponent."""
-    return calculate_similarity_differences(future_profile, career_dataset, PHYSICAL_SIMILARITY_COLUMNS, min_columns)
+def calculate_physical_similarity(df, future_profile, career_dataset, min_columns=None, weight_class=None):
+    """Physical-similarity ranking (age, height, reach) of a fighter's past
+    opponents against a future opponent. df, weight_class: see
+    calculate_similarity_differences (population scaling reference)."""
+    return calculate_similarity_differences(df, future_profile, career_dataset, PHYSICAL_SIMILARITY_COLUMNS,
+                                             min_columns, weight_class=weight_class)
 
 
-def calculate_style_similarity(future_profile, career_dataset, min_columns=None):
+def calculate_style_similarity(df, future_profile, career_dataset, min_columns=None, weight_class=None):
     """
     Fighting-style-similarity ranking of past opponents against a future
     opponent, across STYLE_SIMILARITY_COLUMNS. Also reports a per-axis
@@ -2075,10 +2250,11 @@ def calculate_style_similarity(future_profile, career_dataset, min_columns=None)
     fighters who land on a similar overall total_difference for different
     reasons (similar power, different grappling vs. similar grappling,
     different power) are distinguishable in the output, not collapsed into
-    one number.
+    one number. df, weight_class: see calculate_similarity_differences
+    (population scaling reference).
     """
-    return calculate_similarity_differences(future_profile, career_dataset, STYLE_SIMILARITY_COLUMNS, min_columns,
-                                             axis_map=STYLE_SIMILARITY_AXES)
+    return calculate_similarity_differences(df, future_profile, career_dataset, STYLE_SIMILARITY_COLUMNS,
+                                             min_columns, axis_map=STYLE_SIMILARITY_AXES, weight_class=weight_class)
 
 
 def find_most_similar_past_opponents(df, fighter_name, future_opponent_name, exclude_future_opponent=True,
@@ -2126,8 +2302,15 @@ def find_most_similar_past_opponents(df, fighter_name, future_opponent_name, exc
         future_opponent_url = future_profile['fighter_url'].values[0]
         career_dataset = career_dataset[career_dataset['opponent_fighter_url'] != future_opponent_url]
 
-    physical = calculate_physical_similarity(future_profile, career_dataset, min_columns)
-    style = calculate_style_similarity(future_profile, career_dataset, min_columns)
+    # Scale comparisons against the future opponent's OWN division -- the
+    # relevant context is "how similar is this by the standards of the
+    # fight actually being prepped for," not the past opponent's division
+    # or the promotion as a whole. See calculate_similarity_differences /
+    # _compute_robust_scale_reference for why and the fallback if that
+    # division doesn't have enough data.
+    weight_class = future_profile['weight_class_cleaned'].values[0]
+    physical = calculate_physical_similarity(df, future_profile, career_dataset, min_columns, weight_class)
+    style = calculate_style_similarity(df, future_profile, career_dataset, min_columns, weight_class)
     return physical, style
 
 

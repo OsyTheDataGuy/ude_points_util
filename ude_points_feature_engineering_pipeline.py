@@ -548,6 +548,75 @@ def add_dynamic_kd_rate(df):
 
     return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
+def add_dynamic_control_minute_rate(df):
+    """
+    Cumulative running rate entering each fight: count of an event /
+    minutes of THIS fighter's own control time so far -- NOT minutes of
+    total fight time like add_dynamic_attempt_rate's rate columns.
+    Answers "how busy is this fighter once they actually have someone
+    controlled," a different question from "how much output relative to
+    the whole fight clock": Khabib Nurmagomedov and Jailton Almeida have a
+    similar dynamic_ground_strikes_attempt_rate (per total fight-minute:
+    3.08 vs. 2.79, entering their respective latest fights), but Khabib's
+    ground_strikes_per_control_minute (5.54) is ~60% higher than
+    Almeida's (3.51) -- despite Almeida having the far higher overall
+    ground SHARE (0.80 vs. 0.38). Read together with
+    dynamic_ctrl_time_share (Almeida's is the higher of the two, 0.79 vs.
+    0.56) and dynamic_sub_att_rate (also higher for Almeida), the shape
+    that falls out is a real stylistic distinction: Khabib is the
+    higher-output ground striker once on top; Almeida holds control
+    longer and works more patiently -- more of his control time converts
+    into hunting a finish than into volume striking. Overall ground share
+    or the total-fight-time rate alone can't surface that; this can.
+
+    CAVEAT, not fixed by this column and not fixable from the columns
+    available: the numerator counts (ground strikes attempted, submission
+    attempts) are NOT strictly "thrown/attempted while in control" -- a
+    fighter can attempt either from the bottom, or mid-scramble, before
+    control is established or after it is lost. UFCStats' box score
+    doesn't separate "while controlling" from "while not," so this is a
+    close approximation for a genuinely control-dominant fighter, not a
+    perfectly causal "per minute of control" figure. See
+    data_dictionary.md.
+
+    Uses only raw ctrl_in_secs/ground_strikes_attempted/sub_att -- no
+    ordering dependency on add_time_and_per_min_features (unlike
+    add_dynamic_attempt_rate, which needs total_time_in_mins).
+
+    dynamic_ground_strikes_per_control_minute = cumulative ground strikes
+    attempted / cumulative minutes of own control time.
+    dynamic_sub_attempts_per_control_minute = cumulative submission
+    attempts / cumulative minutes of own control time.
+
+    Both NaN before a fighter has any control time on record -- division
+    by zero avoided the same way as every other dynamic_* rate/accuracy
+    column in this file: NaN, not 0.0, so a similarity comparison drops
+    the column from its mean instead of reading "no data yet" as a
+    genuine zero rate.
+    """
+    specs = [
+        ('ground_strikes_attempted', 'dynamic_ground_strikes_per_control_minute'),
+        ('sub_att', 'dynamic_sub_attempts_per_control_minute'),
+    ]
+    new_cols = {f'{out}_{f}': [] for _, out in specs for f in ['fighter_1', 'fighter_2']}
+    cumulative_ctrl_mins = {}
+    cumulative_count = {stat: {} for stat, _ in specs}
+
+    for row in df.itertuples(index=False):
+        for f_col in ['fighter_1', 'fighter_2']:
+            f_url = getattr(row, f'fighter_url_{f_col}')
+            c_ctrl = cumulative_ctrl_mins.get(f_url, 0.0)
+            for stat, out in specs:
+                c_count = cumulative_count[stat].get(f_url, 0.0)
+                rate = np.nan if c_ctrl == 0 else round(c_count / c_ctrl, 3)
+                new_cols[f'{out}_{f_col}'].append(rate)
+                count = getattr(row, f'{stat}_{f_col}')
+                cumulative_count[stat][f_url] = c_count + (count if pd.notna(count) else 0)
+            ctrl_secs = getattr(row, f'ctrl_in_secs_{f_col}')
+            cumulative_ctrl_mins[f_url] = c_ctrl + ((ctrl_secs / 60) if pd.notna(ctrl_secs) else 0)
+
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
 def add_dynamic_td_accuracy(df):
     td_acc_1, td_acc_2 = [], []
     cumulative_stats = {}
@@ -1217,6 +1286,7 @@ def engineer_all_features(
     df = add_dynamic_td_defence(df)
     df = add_dynamic_strike_position_share(df)
     df = add_dynamic_kd_rate(df)
+    df = add_dynamic_control_minute_rate(df)
 
     # 9. Standing significant strikes (must run before per-minute rates below,
     # which scan df.columns for every *_landed/*_attempted column still
