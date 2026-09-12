@@ -33,3 +33,10 @@ content_research/
 technical_writeup.md
 ChatGPT's suggestion for turning ude points dataset into content machine.docx
 dataset refresh 2026_09_08 report.md
+
+# New files (reports, plans, backing docs) default to local-only unless
+# explicitly approved for the remote -- see CLAUDE.md's "Nothing new reaches
+# the GitHub remote unless explicitly told to". Add each new one here as it's
+# created, not after the fact.
+similarity_and_power_improvement_plan.md
+style_axes_story_test_report.md
