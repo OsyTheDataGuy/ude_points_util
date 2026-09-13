@@ -1974,7 +1974,14 @@ def generate_fighter_profile(df, fighter_name, as_of=None):
                # per-call min-max over a handful of candidates (see its
                # docstring). Not part of PHYSICAL/STYLE_SIMILARITY_COLUMNS:
                # it's the scaling CONTEXT, not a compared dimension itself.
-               'weight_class_cleaned': latest.get('weight_class_cleaned')}
+               'weight_class_cleaned': latest.get('weight_class_cleaned'),
+               # Keys this fighter's own exposure lookup in
+               # calculate_similarity_differences' evidence_weighting --
+               # exposure is a snapshot-in-time quantity (cumulative
+               # attempts entering a specific fight), so it needs the date
+               # of the fight this profile's dynamic_* values snapshot,
+               # not just the fighter's identity.
+               'profile_event_date': latest.get('event_date')}
     for col in PHYSICAL_SIMILARITY_COLUMNS + STYLE_SIMILARITY_COLUMNS:
         profile[col] = latest.get(col)
 
@@ -2223,7 +2230,7 @@ def classify_fighter_archetype(df, fighter_name, as_of=None):
     distributions are unimodal with no natural gap between clusters (MMA
     styles form a spectrum here, not discrete groups) -- these percentile
     cut-points are a disclosed convention, not a discovered boundary:
-    ARCHETYPE_ORIENTATION_STRIKER_PCT30=-0.243, _GRAPPLER_PCT70=0.372,
+    ARCHETYPE_ORIENTATION_STRIKER_PCT30=-0.297, _GRAPPLER_PCT70=0.395,
     ARCHETYPE_STYLE_CONTROL_SUB_PCT30=-0.912, _GROUND_AND_POUND_PCT70=1.273.
 
     Labels, applied hierarchically (style only distinguishes fighters who
@@ -2264,8 +2271,8 @@ def classify_fighter_archetype(df, fighter_name, as_of=None):
                      'sub_attempts_per_control_minute_max_fight_share']]
 
 
-ARCHETYPE_ORIENTATION_STRIKER_PCT30 = -0.243
-ARCHETYPE_ORIENTATION_GRAPPLER_PCT70 = 0.372
+ARCHETYPE_ORIENTATION_STRIKER_PCT30 = -0.297
+ARCHETYPE_ORIENTATION_GRAPPLER_PCT70 = 0.395
 ARCHETYPE_STYLE_CONTROL_SUB_PCT30 = -0.912
 ARCHETYPE_STYLE_GROUND_AND_POUND_PCT70 = 1.273
 
@@ -2289,9 +2296,160 @@ def _archetype_label(orientation, style):
     return 'well-rounded'
 
 
+# {column: (raw_attempted_column_stem, 'own'|'opp', prior_strength_k, divisor)}
+# -- the 16 STYLE_SIMILARITY_COLUMNS whose reliability depends on how much
+# real exposure (attempts, or attempts faced, or control-minutes) backs the
+# cumulative value entering a given fight. 'own' means the stem is read off
+# THIS fighter's side each fight (accuracy, and the two _per_control_minute
+# columns, whose exposure is cumulative control-minutes); 'opp' means it's
+# read off the OPPONENT's side (defence -- exposure is attempts FACED, not
+# thrown). k values are the same beta-binomial-MLE-fit prior strengths
+# derived for the (abandoned) phase-2 shrinkage plan -- reused here because
+# they answer the identical question ("how much does this fighter's
+# observed rate deserve to be trusted") that calculate_similarity_differences'
+# evidence_weighting needs, even though the stored dynamic_* columns
+# themselves stay unshrunk (raw) for these 14 -- see
+# canonical_project_state.md's opponent-similarity section for why
+# shrinking the columns directly was tried and reverted. dynamic_td_accuracy
+# IS shrunk (feeds classify_fighter_archetype) -- k=21.74 here matches its
+# shrinkage prior_strength exactly, so evidence_weighting and the stored
+# value agree on how much a given attempt count is worth trusting.
+# dynamic_sig_strikes_accuracy/_defence have no entry: they aren't in
+# STYLE_SIMILARITY_COLUMNS at all (computed by the pipeline, never
+# consumed by opponent-similarity), so there's nothing here to weight.
+SIMILARITY_EXPOSURE_SPEC = {
+    'dynamic_head_strikes_accuracy': ('head_strikes_attempted', 'own', 29.83, 1.0),
+    'dynamic_head_strikes_defence': ('head_strikes_attempted', 'opp', 29.35, 1.0),
+    'dynamic_body_strikes_accuracy': ('body_strikes_attempted', 'own', 30.49, 1.0),
+    'dynamic_body_strikes_defence': ('body_strikes_attempted', 'opp', 30.18, 1.0),
+    'dynamic_leg_strikes_accuracy': ('leg_strikes_attempted', 'own', 28.19, 1.0),
+    'dynamic_leg_strikes_defence': ('leg_strikes_attempted', 'opp', 23.87, 1.0),
+    'dynamic_clinch_strikes_accuracy': ('clinch_strikes_attempted', 'own', 30.25, 1.0),
+    'dynamic_clinch_strikes_defence': ('clinch_strikes_attempted', 'opp', 36.13, 1.0),
+    'dynamic_distance_strikes_accuracy': ('distance_strikes_attempted', 'own', 36.09, 1.0),
+    'dynamic_distance_strikes_defence': ('distance_strikes_attempted', 'opp', 44.45, 1.0),
+    'dynamic_ground_strikes_accuracy': ('ground_strikes_attempted', 'own', 27.34, 1.0),
+    'dynamic_ground_strikes_defence': ('ground_strikes_attempted', 'opp', 25.85, 1.0),
+    'dynamic_td_accuracy': ('td_attempted', 'own', 21.74, 1.0),
+    'dynamic_td_defence': ('td_attempted', 'opp', 11.50, 1.0),
+    'dynamic_ground_strikes_per_control_minute': ('ctrl_in_secs', 'own', 30.0, 60.0),
+    'dynamic_sub_attempts_per_control_minute': ('ctrl_in_secs', 'own', 30.0, 60.0),
+}
+
+
+def _compute_exposure_table(df, columns):
+    """
+    {column: DataFrame(fighter_url, event_date, exposure)} -- cumulative
+    exposure ENTERING each fight (own attempts for accuracy, attempts FACED
+    for defence, cumulative control-minutes for the two
+    _per_control_minute columns) for every column in `columns` that has a
+    SIMILARITY_EXPOSURE_SPEC entry. This is the same quantity
+    _shrink_rate's own "total" argument holds for that column at that
+    exact point in a fighter's career -- reused here to evidence-weight
+    calculate_similarity_differences, not to change any stored dynamic_*
+    column. Computed fresh from df every call, never cached -- same
+    as_of-leakage rule as _compute_robust_scale_reference (its docstring).
+
+    One row per (fighter_url, event_date); a fighter who fought twice on
+    the same date (a same-night doubleheader -- see
+    data_integrity_and_invariants.md, 2 fighter-nights across 761 events)
+    collapses to one row via keep='last', since a lookup needs a single
+    deterministic answer and the underlying dynamic_* state machine has
+    the identical order-dependent ambiguity for those exact rows already.
+    """
+    relevant = [c for c in columns if c in SIMILARITY_EXPOSURE_SPEC]
+    tables = {}
+    if not relevant:
+        return tables
+    # ['event_date', 'fight_url'], not event_date alone -- every chronological
+    # state machine in this project sorts this way (see
+    # data_integrity_and_invariants.md) so a same-day doubleheader resolves
+    # deterministically rather than by incidental input row order.
+    df_sorted = df.sort_values(['event_date', 'fight_url'], kind='stable')
+    for col in relevant:
+        raw_stem, source, k, divisor = SIMILARITY_EXPOSURE_SPEC[col]
+        frames = []
+        for side, opp in [('fighter_1', 'fighter_2'), ('fighter_2', 'fighter_1')]:
+            src_side = side if source == 'own' else opp
+            raw_col = f'{raw_stem}_{src_side}'
+            frames.append(pd.DataFrame({
+                'fighter_url': df_sorted[f'fighter_url_{side}'].values,
+                'event_date': df_sorted['event_date'].values,
+                'fight_url': df_sorted['fight_url'].values,
+                'raw': (df_sorted[raw_col].fillna(0) / divisor).values,
+            }))
+        long = pd.concat(frames, ignore_index=True).sort_values(['fighter_url', 'event_date', 'fight_url'], kind='stable')
+        # cumsum includes the current row; subtracting it back out gives
+        # the cumulative total ENTERING this fight, not including it.
+        long['exposure'] = long.groupby('fighter_url')['raw'].cumsum() - long['raw']
+        tables[col] = long[['fighter_url', 'event_date', 'exposure']].drop_duplicates(
+            subset=['fighter_url', 'event_date'], keep='last').reset_index(drop=True)
+    return tables
+
+
+def _gini_mean_difference(x):
+    """
+    Mean absolute difference between every pair of values in a population
+    -- a scale-consistent "how far apart are two random draws from this
+    population" measure, used as calculate_similarity_differences'
+    evidence_weighting imputation target for a column too thin on
+    evidence to trust its own observed value. O(n log n) via the sorted-
+    values identity (sum_i (2i-n-1)*x_i for 1-indexed sorted x), not the
+    naive O(n^2) all-pairs sum.
+    """
+    x = np.sort(np.asarray(x, dtype=float))
+    n = len(x)
+    if n < 2:
+        return np.nan
+    idx = np.arange(1, n + 1)
+    return 2 * np.sum((2 * idx - n - 1) * x) / (n * (n - 1))
+
+
+def _compute_expected_difference_reference(df, columns, weight_class=None,
+                                            min_division_observations=MIN_DIVISION_OBSERVATIONS_FOR_SCALING):
+    """
+    {column: expected scaled |difference| between two random fighters} --
+    what calculate_similarity_differences' evidence_weighting imputes for
+    a column too thin on evidence to trust: gini_mean_difference(population
+    raw values) / scale, on the same division-scoped-with-promotion-wide-
+    fallback population _compute_robust_scale_reference itself uses for
+    that column, so a fully-unknown column contributes neither "similar"
+    nor "different" -- just the population's own typical spread. NOT a
+    constant across columns (measured range 1.09-2.07 across the 16
+    SIMILARITY_EXPOSURE_SPEC columns) -- must be computed per column.
+    """
+    long = _build_population_long_table(df, columns)
+    scale_reference = _compute_robust_scale_reference(df, columns, weight_class, min_division_observations)
+
+    def _gmd_over_scale(values, scale):
+        if scale is None or pd.isna(scale) or scale == 0:
+            return np.nan
+        vals = pd.Series(values).dropna().values
+        if len(vals) < 2:
+            return np.nan
+        return _gini_mean_difference(vals) / scale
+
+    promo_ref = {c: _gmd_over_scale(long[c], scale_reference.get(c)) for c in columns}
+
+    if weight_class is None or pd.isna(weight_class):
+        return promo_ref
+
+    div_long = long[long['weight_class_cleaned'] == weight_class]
+    ref = {}
+    for c in columns:
+        div_vals = div_long[c].dropna()
+        if len(div_vals) >= min_division_observations:
+            div_val = _gmd_over_scale(div_vals, scale_reference.get(c))
+            ref[c] = div_val if pd.notna(div_val) else promo_ref[c]
+        else:
+            ref[c] = promo_ref[c]
+    return ref
+
+
 def calculate_similarity_differences(df, future_profile, career_dataset, columns_to_compare, min_columns=None,
                                       axis_map=None, weight_class=None,
-                                      min_division_observations=MIN_DIVISION_OBSERVATIONS_FOR_SCALING):
+                                      min_division_observations=MIN_DIVISION_OBSERVATIONS_FOR_SCALING,
+                                      evidence_weighting=True):
     """
     Signed, SCALED differences between a future opponent's profile and
     each of a fighter's past opponents (from create_fighter_career_dataset's
@@ -2340,7 +2498,8 @@ def calculate_similarity_differences(df, future_profile, career_dataset, columns
     actually AVAILABLE for this call, allow one missing when 4+ are
     available. "Available" means non-NaN on the FUTURE OPPONENT specifically
     -- a column the future opponent is themselves NaN on (e.g. the
-    _per_control_minute columns for anyone below MIN_CONTROL_MINUTES_FOR_RATE)
+    _per_control_minute columns for anyone with literally zero career
+    control-minutes on record)
     can never be compared for ANY candidate in this call, since a NaN
     future_value drops that column for every row (see the S1 fix below).
     The default is computed from that achievable ceiling, not from
@@ -2409,6 +2568,39 @@ def calculate_similarity_differences(df, future_profile, career_dataset, columns
     it (see generate_fighter_profile). Missing on a df built before the
     Stance pipeline addition (e.g. plain v2_6.csv) -- the column is simply
     omitted in that case, not an error.
+
+    evidence_weighting: True (default) down-weights a column's contribution
+    to total_difference toward a population-typical "expected difference"
+    (see _compute_expected_difference_reference) in proportion to how much
+    real exposure backs BOTH the candidate's and the future opponent's
+    value on that column, for the 16 columns in SIMILARITY_EXPOSURE_SPEC.
+    Per column, per candidate: w = (e_candidate / (e_candidate + k)) *
+    (e_future / (e_future + k)) -- algebraically the same weight
+    _shrink_rate itself places on observed vs. prior data, since
+    (count + k*p)/(total + k) = w*(count/total) + (1-w)*p with
+    w = total/(total+k). adjusted_|diff| = w*|diff| + (1-w)*expected_diff.
+    Exists because these 14 accuracy/defence columns (plus the already-
+    shrunk dynamic_td_accuracy/_defence, weighted the same way for
+    consistency) stay UNSHRUNK at the source -- shrinking them directly
+    was tried and reverted (see canonical_project_state.md): shrinkage
+    pulls a thin-evidence candidate's raw value toward the population
+    prior, which then LOOKS like real, present evidence to
+    total_difference's plain mean-of-available (it still counts toward
+    n_columns_compared) even though it carries almost none -- systematically
+    promoting thin-record opponents up the ranking (measured: mean per-call
+    Spearman(exposure, rank gain) -0.44 across 1,388 real matchup calls
+    with the 14 columns shrunk, vs. +0.04 with evidence_weighting on raw
+    values instead). A hard exposure floor was tried too and made this
+    worse, not better -- dropping a thin column outright grades that
+    candidate on an easier, smaller test, the exact failure min_columns
+    already exists to prevent (see above); imputing a population-typical
+    difference instead means an unknown column reads as neither similar
+    nor different, and n_columns_compared/min_columns are untouched --
+    effective_columns_compared (new output column, sum of w over non-NaN
+    columns, column-equivalents) exposes the weighted coverage instead of
+    gating on it. False reproduces the pre-evidence-weighting behavior
+    exactly (bit-identical total_difference) -- calculate_physical_similarity
+    passes this, since physical columns have no exposure model.
     """
     if future_profile.shape[0] != 1:
         raise ValueError("Future opponent profile must contain exactly one row.")
@@ -2419,6 +2611,20 @@ def calculate_similarity_differences(df, future_profile, career_dataset, columns
 
     scale_reference = _compute_robust_scale_reference(df, columns_to_compare, weight_class,
                                                         min_division_observations)
+
+    exposure_tables, expected_diff_reference, future_exposure, future_event_date = {}, {}, {}, None
+    if evidence_weighting:
+        exposure_tables = _compute_exposure_table(df, columns_to_compare)
+        if exposure_tables:
+            expected_diff_reference = _compute_expected_difference_reference(
+                df, list(exposure_tables.keys()), weight_class, min_division_observations)
+            future_url = future_profile['fighter_url'].values[0]
+            future_event_date = future_profile.get('profile_event_date')
+            future_event_date = future_event_date.values[0] if future_event_date is not None else None
+            for column, exp_table in exposure_tables.items():
+                match = exp_table[(exp_table['fighter_url'] == future_url) &
+                                   (exp_table['event_date'] == future_event_date)]
+                future_exposure[column] = match['exposure'].values[0] if len(match) else 0.0
 
     result = career_dataset[['opponent', 'opponent_fighter_url']].copy()
     if 'event_date' in career_dataset.columns:
@@ -2434,6 +2640,7 @@ def calculate_similarity_differences(df, future_profile, career_dataset, columns
         )
 
     abs_diffs = {}
+    weights = {}
 
     for column in columns_to_compare:
         career_column = f'opponent_{column}'
@@ -2463,7 +2670,28 @@ def calculate_similarity_differences(df, future_profile, career_dataset, columns
             scaled_diff = (past_values - future_value) / scale
 
         result[f'diff_{column}'] = scaled_diff.values
-        abs_diffs[column] = scaled_diff.abs()
+        abs_diff = scaled_diff.abs()
+
+        if evidence_weighting and column in exposure_tables:
+            k = SIMILARITY_EXPOSURE_SPEC[column][2]
+            exp_table = exposure_tables[column]
+            cand_key = pd.DataFrame({
+                'fighter_url': career_dataset['opponent_fighter_url'].values,
+                'event_date': career_dataset['event_date'].values,
+            })
+            e_cand = cand_key.merge(exp_table, on=['fighter_url', 'event_date'], how='left')['exposure'].fillna(0).values
+            w_cand = e_cand / (e_cand + k)
+            e_future = future_exposure.get(column, 0.0)
+            w_future = e_future / (e_future + k)
+            w = w_cand * w_future
+            expected_diff = expected_diff_reference.get(column, np.nan)
+            present = abs_diff.notna().values
+            adjusted = np.where(present, w * abs_diff.values + (1 - w) * expected_diff, np.nan)
+            abs_diffs[column] = pd.Series(adjusted, index=career_dataset.index)
+            weights[column] = pd.Series(np.where(present, w, np.nan), index=career_dataset.index)
+        else:
+            abs_diffs[column] = abs_diff
+            weights[column] = pd.Series(np.where(abs_diff.notna().values, 1.0, np.nan), index=career_dataset.index)
 
     # total_difference is the MEAN of the available |diff| values per row,
     # not a sum with missing columns filled to 0. Filling-to-0 would make
@@ -2474,12 +2702,20 @@ def calculate_similarity_differences(df, future_profile, career_dataset, columns
     # reads as similarity. n_columns_compared exposes how many columns a
     # score actually rests on, and any row below min_columns gets a NaN
     # total_difference so it sorts past the fully-compared candidates
-    # instead of beating them on a thin subset.
+    # instead of beating them on a thin subset. n_columns_compared and
+    # min_columns are both unaffected by evidence_weighting -- they gate
+    # on whether a column is PRESENT (non-NaN), not on how much it's
+    # trusted; effective_columns_compared (below) reports the latter
+    # separately rather than folding it into the same gate.
     stacked = pd.concat(list(abs_diffs.values()), axis=1)
     result['n_columns_compared'] = stacked.notna().sum(axis=1).values
     total = stacked.mean(axis=1, skipna=True)
     total[result['n_columns_compared'].values < min_columns] = np.nan
     result['total_difference'] = total.values
+
+    if evidence_weighting:
+        weights_stacked = pd.concat(list(weights.values()), axis=1)
+        result['effective_columns_compared'] = weights_stacked.sum(axis=1, skipna=True).round(3).values
 
     if axis_map:
         for axis_name, axis_columns in axis_map.items():
@@ -2496,12 +2732,17 @@ def calculate_similarity_differences(df, future_profile, career_dataset, columns
 def calculate_physical_similarity(df, future_profile, career_dataset, min_columns=None, weight_class=None):
     """Physical-similarity ranking (age, height, reach) of a fighter's past
     opponents against a future opponent. df, weight_class: see
-    calculate_similarity_differences (population scaling reference)."""
+    calculate_similarity_differences (population scaling reference).
+    evidence_weighting=False: physical columns have no SIMILARITY_EXPOSURE_SPEC
+    entry (no exposure model), so weighting would be a no-op -- skipped
+    explicitly to avoid building the exposure/expected-difference references
+    for nothing."""
     return calculate_similarity_differences(df, future_profile, career_dataset, PHYSICAL_SIMILARITY_COLUMNS,
-                                             min_columns, weight_class=weight_class)
+                                             min_columns, weight_class=weight_class, evidence_weighting=False)
 
 
-def calculate_style_similarity(df, future_profile, career_dataset, min_columns=None, weight_class=None):
+def calculate_style_similarity(df, future_profile, career_dataset, min_columns=None, weight_class=None,
+                                evidence_weighting=True):
     """
     Fighting-style-similarity ranking of past opponents against a future
     opponent, across STYLE_SIMILARITY_COLUMNS. Also reports a per-axis
@@ -2510,15 +2751,17 @@ def calculate_style_similarity(df, future_profile, career_dataset, min_columns=N
     fighters who land on a similar overall total_difference for different
     reasons (similar power, different grappling vs. similar grappling,
     different power) are distinguishable in the output, not collapsed into
-    one number. df, weight_class: see calculate_similarity_differences
-    (population scaling reference).
+    one number. df, weight_class, evidence_weighting: see
+    calculate_similarity_differences (evidence_weighting on by default here,
+    since 16 of these 27 columns have a SIMILARITY_EXPOSURE_SPEC entry).
     """
     return calculate_similarity_differences(df, future_profile, career_dataset, STYLE_SIMILARITY_COLUMNS,
-                                             min_columns, axis_map=STYLE_SIMILARITY_AXES, weight_class=weight_class)
+                                             min_columns, axis_map=STYLE_SIMILARITY_AXES, weight_class=weight_class,
+                                             evidence_weighting=evidence_weighting)
 
 
 def find_most_similar_past_opponents(df, fighter_name, future_opponent_name, exclude_future_opponent=True,
-                                     as_of=None, min_columns=None):
+                                     as_of=None, min_columns=None, evidence_weighting=True):
     """
     For fighter_name's upcoming fight against future_opponent_name, find
     which of fighter_name's PAST opponents most resemble future_opponent_name
@@ -2548,6 +2791,9 @@ def find_most_similar_past_opponents(df, fighter_name, future_opponent_name, exc
     identity-safety reason used throughout this project (two different
     fighters can share a name; URLs can't collide).
 
+    evidence_weighting: passed through to the style call only (physical
+    columns have no exposure model) -- see calculate_similarity_differences.
+
     Returns (physical_similarity_df, style_similarity_df), each sorted
     most-similar-first via total_difference (NaN, i.e. under-covered, rows
     last).
@@ -2570,7 +2816,8 @@ def find_most_similar_past_opponents(df, fighter_name, future_opponent_name, exc
     # division doesn't have enough data.
     weight_class = future_profile['weight_class_cleaned'].values[0]
     physical = calculate_physical_similarity(df, future_profile, career_dataset, min_columns, weight_class)
-    style = calculate_style_similarity(df, future_profile, career_dataset, min_columns, weight_class)
+    style = calculate_style_similarity(df, future_profile, career_dataset, min_columns, weight_class,
+                                        evidence_weighting=evidence_weighting)
     return physical, style
 
 

@@ -44,3 +44,4 @@ style_axes_story_test_report.md
 # Claude Code local settings (attribution.commit/.pr disabled here) --
 # machine-specific, never pushed.
 .claude/settings.local.json
+dynamic_accuracy_shrinkage_plan.md

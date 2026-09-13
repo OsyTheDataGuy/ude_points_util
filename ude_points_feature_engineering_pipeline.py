@@ -652,6 +652,27 @@ def add_dynamic_control_minute_rate(df):
     return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
 def add_dynamic_td_accuracy(df):
+    """
+    Cumulative career-to-date TD accuracy entering each fight, Bayesian-shrunk
+    toward the population's own pooled rate via ude_points_utils._shrink_rate --
+    the same mechanism add_dynamic_control_minute_rate already uses -- rather
+    than a raw, unshrunk landed/attempted ratio. Replaced the raw ratio (2026-09)
+    after it produced meaningless extreme values off a handful of attempts: Jean
+    Silva's dynamic_td_accuracy read 1.000 for 6 consecutive fights off a single
+    lifetime landed takedown attempt, which alone was enough to misclassify him
+    in classify_fighter_archetype's grappling_orientation. TD_ACCURACY_PRIOR_STRENGTH
+    and TD_ACCURACY_PRIOR_RATE are a beta-binomial MLE fit (scipy.optimize,
+    multi-start-verified) against every fighter's career-total landed/attempted,
+    not a "~3x median exposure" heuristic -- takedown attempts cluster within a
+    fight (mean 2.87/fight), which breaks the independent-trials assumption a
+    simpler method-of-moments estimate would rely on. NaN only for a fighter with
+    genuinely zero cumulative attempts on record, matching every other dynamic_*
+    column's zero-denominator convention.
+    """
+    from ude_points_utils import _shrink_rate
+    TD_ACCURACY_PRIOR_STRENGTH = 21.74
+    TD_ACCURACY_PRIOR_RATE = 0.3684
+
     td_acc_1, td_acc_2 = [], []
     cumulative_stats = {}
 
@@ -667,7 +688,10 @@ def add_dynamic_td_accuracy(df):
             c_landed = cumulative_stats[f_url]['landed']
             c_attempted = cumulative_stats[f_url]['attempted']
 
-            acc = np.nan if c_attempted == 0 else round(c_landed / c_attempted, 3)
+            if c_attempted == 0:
+                acc = np.nan
+            else:
+                acc = round(_shrink_rate(c_landed, c_attempted, TD_ACCURACY_PRIOR_STRENGTH, TD_ACCURACY_PRIOR_RATE), 3)
             if f_col == 'fighter_1':
                 td_acc_1.append(acc)
             else:
@@ -683,6 +707,19 @@ def add_dynamic_td_accuracy(df):
     return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
 def add_dynamic_td_defence(df):
+    """
+    Cumulative career-to-date TD defence entering each fight, Bayesian-shrunk
+    the same way as add_dynamic_td_accuracy above -- see that docstring for
+    why (unshrunk landed/attempted-style ratios misfire on thin samples) and
+    for how TD_DEFENCE_PRIOR_STRENGTH/_RATE were derived (beta-binomial MLE,
+    same method, fit separately since defence's denominator is cumulative
+    attempts FACED -- the opponent's attempts against this fighter, aggregated
+    across every past opponent -- not this fighter's own attempts.
+    """
+    from ude_points_utils import _shrink_rate
+    TD_DEFENCE_PRIOR_STRENGTH = 11.50
+    TD_DEFENCE_PRIOR_RATE = 0.6009
+
     td_def_1, td_def_2 = [], []
     cumulative_defence_stats = {}
 
@@ -698,7 +735,10 @@ def add_dynamic_td_defence(df):
             c_faced = cumulative_defence_stats[f_url]['faced']
             c_avoided = cumulative_defence_stats[f_url]['avoided']
 
-            def_val = np.nan if c_faced == 0 else round(c_avoided / c_faced, 3)
+            if c_faced == 0:
+                def_val = np.nan
+            else:
+                def_val = round(_shrink_rate(c_avoided, c_faced, TD_DEFENCE_PRIOR_STRENGTH, TD_DEFENCE_PRIOR_RATE), 3)
             if f_col == 'fighter_1':
                 td_def_1.append(def_val)
             else:
