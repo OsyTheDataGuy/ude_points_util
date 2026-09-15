@@ -109,8 +109,24 @@ def split_fight_stats(df: pd.DataFrame, stat_cols: list) -> pd.DataFrame:
             # Strip spaces from numeric stats before split
             split_df = df[col].astype(str).str.replace(' ', '').str.split('\n', expand=True)
 
-        df_f1[col] = split_df[0].str.strip() if 0 in split_df.columns else ''
-        df_f2[col] = split_df[1].str.strip() if 1 in split_df.columns else ''
+        v1 = split_df[0].str.strip() if 0 in split_df.columns else pd.Series([''] * len(df), index=df.index)
+        v2 = split_df[1].str.strip() if 1 in split_df.columns else pd.Series([''] * len(df), index=df.index)
+
+        # kd/sub_att/rev are plain per-fight counts (not an 'X of Y' column
+        # split further downstream, not a time/pct string) -- coerce here so
+        # they're numeric regardless of whether the row came from a fresh
+        # scrape or a CSV round-trip. Without this, a freshly-scraped row
+        # keeps these as strings while historical rows read back from
+        # current_df.csv are already int64 (pandas' own CSV type inference);
+        # mixing the two in one run crashes the first cumulative state
+        # machine that does arithmetic on them (add_dynamic_kd_rate:
+        # TypeError: unsupported operand type(s) for +=: 'int' and 'str').
+        if col in ('kd', 'sub_att', 'rev'):
+            v1 = pd.to_numeric(v1, errors='coerce')
+            v2 = pd.to_numeric(v2, errors='coerce')
+
+        df_f1[col] = v1
+        df_f2[col] = v2
 
     # Recombine split frames back into 2 rows per fight
     new_df = pd.concat([df_f1, df_f2], ignore_index=True)
