@@ -12,6 +12,16 @@ scipy==1.16.3
 statsmodels==0.14.5
 patsy==1.0.1
 
+# ude_points_utils.py imports these at module level (not just where plots are
+# drawn), and ude_points_feature_engineering_pipeline.py now imports from
+# ude_points_utils inside the scoring path (add_dynamic_td_accuracy /
+# add_dynamic_td_defence -> _shrink_rate) -- so engineer_all_features can't run
+# without them, on a headless CI runner or anywhere else. None affect scoring
+# output; pinned only for a reproducible install.
+matplotlib==3.10.6
+seaborn==0.13.2
+plotly==6.3.0
+
 # Scrape-only; do not affect scoring reproducibility.
 beautifulsoup4==4.13.5
 tqdm==4.67.1

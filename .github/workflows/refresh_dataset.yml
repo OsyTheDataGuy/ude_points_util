@@ -102,6 +102,15 @@ jobs:
 
       - name: Run full pipeline + validation
         run: |
+          # set -o pipefail: this runner's default shell for `run:` does NOT
+          # propagate a failing left-hand command through a pipe -- confirmed
+          # live on 2026-09-15 (run 34962713786): run_refresh.py crashed with
+          # ModuleNotFoundError (a real bug, fixed in requirements.txt) but
+          # `| tee` still exited 0, so this step reported success, opened a
+          # "refresh" PR containing only the bio scraper's fighters_df.csv
+          # change, and silently never touched current_df.csv. Without this,
+          # any future crash here is invisible the same way.
+          set -o pipefail
           # current_df.csv IS the prior production file (this repo's rolling
           # convention) -- read as BOTH --current-dataset and
           # --previous-production-file. run_refresh.py loads both fully
