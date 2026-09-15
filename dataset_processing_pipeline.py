@@ -164,8 +164,15 @@ def clean_modified_df(df: pd.DataFrame) -> pd.DataFrame:
 def split_strike_column(df: pd.DataFrame, col: str, new_col_landed: str, new_col_attempted: str) -> pd.DataFrame:
     """Splits 'landed of attempted' string into separate numeric columns."""
     split_df = df[col].astype(str).str.split('of', expand=True)
-    df[new_col_landed] = pd.to_numeric(split_df[0].str.strip(), errors='coerce')
-    df[new_col_attempted] = pd.to_numeric(split_df[1].str.strip(), errors='coerce') if split_df.shape[1] > 1 else np.nan
+    # `0 in split_df.columns` guard (same idiom split_fight_stats already
+    # uses): str.split(expand=True) on a 0-row Series returns a 0-column
+    # frame, so split_df[0] KeyErrors. An empty df here is a real, ordinary
+    # case -- every scraped fight this run failed the event-date join (e.g.
+    # a weekly refresh whose only "new" rows are ones missing from
+    # greco1899's event list) and drop_rows_with_null_event_date left 0 rows
+    # to process.
+    df[new_col_landed] = pd.to_numeric(split_df[0].str.strip(), errors='coerce') if 0 in split_df.columns else np.nan
+    df[new_col_attempted] = pd.to_numeric(split_df[1].str.strip(), errors='coerce') if 1 in split_df.columns else np.nan
     return df
 
 
