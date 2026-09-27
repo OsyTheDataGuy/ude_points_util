@@ -29,6 +29,8 @@ Things about the current state of `current_df.csv` and the pipeline that aren't 
 - **Name-keyed ranking collisions:** `rank_fighters_by_shrunk_ude_rate` and its wrappers key on the fighter *name string*. Distinct fighters who share a name (e.g. two "Bruno Silva"s) collide into one inflated/garbled row. Harmless at `min_fights=10` for the known cases so far, but check name uniqueness before trusting any new sub-population ranking.
 - `calculate_phase_magnitude_and_pdi` was edited post-v2.6-lock to fix the `decisive_wins`/`close_wins`/`ties` misclassification above by rounding a separate copy of the phase magnitudes before classification bucketing — verified to leave `pdi_margin` and every scored output bit-identical.
 
+- **Raw per-attempt success rates drift by era — compare them era-locally, never across eras.** Pooled opponent success at distance is 0.361 in 2011–15 and 0.438 in 2021–26; clinch 0.680 → 0.738; ground 0.686 (2011–15) → 0.719 (2021–26); takedown is flat since 2011 (0.359 → 0.363, down from ~0.43 before). `assess_defensive_vulnerability` therefore references each fight's era-local pooled rate (the 3 years before it) rather than an all-era rate, which would read nearly every modern fighter as weak at distance. The stored raw `dynamic_*_accuracy`/`_defence` columns carry this drift as-is, so any comparison of a past snapshot with a much later one (e.g. `find_most_similar_past_opponents`) inherits it; its impact on similarity rankings has not been measured.
+
 ---
 
 ## Working note: how to investigate a surprising ranking or number

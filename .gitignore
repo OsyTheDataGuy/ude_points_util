@@ -45,3 +45,5 @@ style_axes_story_test_report.md
 # machine-specific, never pushed.
 .claude/settings.local.json
 dynamic_accuracy_shrinkage_plan.md
+defensive_vulnerability_plan.md
+field_mechanisms.md

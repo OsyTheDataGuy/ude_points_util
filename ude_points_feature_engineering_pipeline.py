@@ -1315,7 +1315,11 @@ def engineer_all_features(
         for stat in ('sig_strikes_landed', 'sig_strikes_attempted', 'td_landed', 'td_attempted',
                      'head_strikes_landed', 'head_strikes_attempted',
                      'body_strikes_landed', 'body_strikes_attempted',
-                     'leg_strikes_landed', 'leg_strikes_attempted')
+                     'leg_strikes_landed', 'leg_strikes_attempted',
+                     'distance_strikes_landed', 'distance_strikes_attempted',
+                     'clinch_strikes_landed', 'clinch_strikes_attempted',
+                     'ground_strikes_landed', 'ground_strikes_attempted',
+                     'ctrl_in_secs', 'sub_att', 'kd')
         for side in (1, 2)
     ]
     present = [c for c in _cumulative_stat_cols if c in df.columns]

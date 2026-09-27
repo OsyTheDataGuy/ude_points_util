@@ -2316,25 +2316,27 @@ def _archetype_label(orientation, style):
 
 # {column: (raw_attempted_column_stem, 'own'|'opp', prior_strength_k, divisor)}
 # -- the 16 STYLE_SIMILARITY_COLUMNS whose reliability depends on how much
-# real exposure (attempts, or attempts faced, or control-minutes) backs the
-# cumulative value entering a given fight. 'own' means the stem is read off
-# THIS fighter's side each fight (accuracy, and the two _per_control_minute
-# columns, whose exposure is cumulative control-minutes); 'opp' means it's
-# read off the OPPONENT's side (defence -- exposure is attempts FACED, not
-# thrown). k values are the same beta-binomial-MLE-fit prior strengths
-# derived for the (abandoned) phase-2 shrinkage plan -- reused here because
-# they answer the identical question ("how much does this fighter's
-# observed rate deserve to be trusted") that calculate_similarity_differences'
-# evidence_weighting needs, even though the stored dynamic_* columns
-# themselves stay unshrunk (raw) for these 14 -- see
-# canonical_project_state.md's opponent-similarity section for why
-# shrinking the columns directly was tried and reverted. dynamic_td_accuracy
-# IS shrunk (feeds classify_fighter_archetype) -- k=21.74 here matches its
-# shrinkage prior_strength exactly, so evidence_weighting and the stored
-# value agree on how much a given attempt count is worth trusting.
-# dynamic_sig_strikes_accuracy/_defence have no entry: they aren't in
-# STYLE_SIMILARITY_COLUMNS at all (computed by the pipeline, never
-# consumed by opponent-similarity), so there's nothing here to weight.
+# real exposure (attempts, attempts faced, or control-minutes) backs the
+# cumulative value entering a given fight. 'own' reads the stem off THIS
+# fighter's side (accuracy, and the two _per_control_minute columns, whose
+# exposure is cumulative control-minutes); 'opp' reads it off the
+# OPPONENT's side (defence -- exposure is attempts FACED, not thrown). k is
+# the beta-binomial-MLE-fit prior strength for the 14 accuracy/defence
+# columns and 30.0 (the control-minute shrinkage constant) for the two
+# _per_control_minute columns, whose exposure isn't binomial. It is used as a
+# WEIGHTING constant, not a reliability: strikes cluster within fights, so a
+# rate's real reliability at a given exposure is lower than n/(n+k)
+# implies, even though k calibrates predictions well. The 12 head/body/leg/
+# clinch/distance/ground accuracy+defence columns stay unshrunk at the
+# source and are evidence-weighted here instead (see
+# canonical_project_state.md, opponent-similarity section, for why
+# shrinking them directly biases the ranking). dynamic_td_accuracy/
+# _defence and the two _per_control_minute columns are already shrunk at
+# the source and their k matches that shrinkage's prior_strength, so
+# evidence_weighting and the stored value agree on how much an attempt
+# count is worth trusting. dynamic_sig_strikes_accuracy/_defence have no
+# entry: they aren't in STYLE_SIMILARITY_COLUMNS (computed by the pipeline,
+# never consumed by opponent-similarity), so there is nothing to weight.
 SIMILARITY_EXPOSURE_SPEC = {
     'dynamic_head_strikes_accuracy': ('head_strikes_attempted', 'own', 29.83, 1.0),
     'dynamic_head_strikes_defence': ('head_strikes_attempted', 'opp', 29.35, 1.0),
@@ -2597,23 +2599,29 @@ def calculate_similarity_differences(df, future_profile, career_dataset, columns
     _shrink_rate itself places on observed vs. prior data, since
     (count + k*p)/(total + k) = w*(count/total) + (1-w)*p with
     w = total/(total+k). adjusted_|diff| = w*|diff| + (1-w)*expected_diff.
-    Exists because these 14 accuracy/defence columns (plus the already-
-    shrunk dynamic_td_accuracy/_defence, weighted the same way for
-    consistency) stay UNSHRUNK at the source -- shrinking them directly
-    was tried and reverted (see canonical_project_state.md): shrinkage
-    pulls a thin-evidence candidate's raw value toward the population
-    prior, which then LOOKS like real, present evidence to
-    total_difference's plain mean-of-available (it still counts toward
-    n_columns_compared) even though it carries almost none -- systematically
-    promoting thin-record opponents up the ranking (measured: mean per-call
-    Spearman(exposure, rank gain) -0.44 across 1,388 real matchup calls
-    with the 14 columns shrunk, vs. +0.04 with evidence_weighting on raw
-    values instead). A hard exposure floor was tried too and made this
-    worse, not better -- dropping a thin column outright grades that
-    candidate on an easier, smaller test, the exact failure min_columns
-    already exists to prevent (see above); imputing a population-typical
-    difference instead means an unknown column reads as neither similar
-    nor different, and n_columns_compared/min_columns are untouched --
+    Exists because the 12 head/body/leg/clinch/distance/ground accuracy and
+    defence columns (plus the already-shrunk dynamic_td_accuracy/_defence
+    and _per_control_minute columns, weighted the same way for consistency)
+    stay UNSHRUNK at the source -- shrinking them directly biases the ranking
+    (see canonical_project_state.md): shrinkage pulls a thin-evidence
+    candidate's raw value toward the population prior, which then LOOKS like
+    real, present evidence to total_difference's plain mean-of-available
+    (it still counts toward n_columns_compared) even though it carries
+    almost none -- systematically promoting thin-record opponents up the
+    ranking. Measured across 1,388 real matchup calls: shrinking the td
+    pair moved mean per-call Spearman(exposure, rank change) by -0.27 (raw
+    -> td shrunk), and additionally shrinking the other 14 strike columns
+    moved it a further -0.44. With evidence weighting on the unshrunk
+    columns the production bias (-0.233, 95% CI [-0.260, -0.207], 600 calls,
+    vs. the pre-phase-1 raw ranking) becomes +0.009 (CI [-0.020, +0.038]).
+    Dropping a thin column outright would grade that candidate on an easier,
+    smaller test, the failure min_columns already exists to prevent (see
+    above) -- reasoned, not measured; a weighted mean (sum of w*|diff| over
+    sum of w) is scale-invariant in the weights, so a uniformly thin
+    candidate cancels its own down-weighting, and removed only about 28% of
+    the bias when tested. Imputing a population-typical difference instead
+    means an unknown column reads as neither similar nor different, and
+    n_columns_compared/min_columns are untouched --
     effective_columns_compared (new output column, sum of w over non-NaN
     columns, column-equivalents) exposes the weighted coverage instead of
     gating on it. False reproduces the pre-evidence-weighting behavior
@@ -2837,6 +2845,296 @@ def find_most_similar_past_opponents(df, fighter_name, future_opponent_name, exc
     style = calculate_style_similarity(df, future_profile, career_dataset, min_columns, weight_class,
                                         evidence_weighting=evidence_weighting)
     return physical, style
+
+
+'''14. Defensive vulnerability (where a fighter concedes, by area)'''
+
+# area -> (landed_stem, attempted_stem, defence_key, accuracy_key). The two
+# keys index SIMILARITY_EXPOSURE_SPEC: k_def (fighter side -- the ratio prior
+# and evidence_weight, both measuring this fighter's DEFENCE exposure) and
+# k_off (opponent side -- the opponent's prior OFFENSIVE accuracy, which is
+# what the accuracy-column k was fit on). `head` is excluded (redundant with
+# distance -- disattenuated correlation > 1, and head defence adds nothing to
+# predicting distance outcomes out of sample) and so is `sig` (the union of
+# everything). head+body+leg and distance+clinch+ground each partition sig
+# strikes exactly, so areas must never be summed into one number: leg/body
+# are subsets of distance/clinch/ground and any aggregate double-counts.
+DEFENSIVE_VULNERABILITY_AREAS = {
+    'td': ('td_landed', 'td_attempted', 'dynamic_td_defence', 'dynamic_td_accuracy'),
+    'distance': ('distance_strikes_landed', 'distance_strikes_attempted',
+                 'dynamic_distance_strikes_defence', 'dynamic_distance_strikes_accuracy'),
+    'clinch': ('clinch_strikes_landed', 'clinch_strikes_attempted',
+               'dynamic_clinch_strikes_defence', 'dynamic_clinch_strikes_accuracy'),
+    'ground': ('ground_strikes_landed', 'ground_strikes_attempted',
+               'dynamic_ground_strikes_defence', 'dynamic_ground_strikes_accuracy'),
+    'leg': ('leg_strikes_landed', 'leg_strikes_attempted',
+            'dynamic_leg_strikes_defence', 'dynamic_leg_strikes_accuracy'),
+    'body': ('body_strikes_landed', 'body_strikes_attempted',
+             'dynamic_body_strikes_defence', 'dynamic_body_strikes_accuracy'),
+}
+VULNERABILITY_ERA_WINDOW_YEARS = 3
+VULNERABILITY_LABEL_MIN_EVIDENCE_WEIGHT = 0.5
+VULNERABILITY_LABEL_MIN_FIGHTS = 3
+VULNERABILITY_LABEL_Z = 1.0
+VULNERABILITY_MAX_FIGHT_SHARE_MIN_ATTEMPTS = 5
+
+
+def _compute_defensive_vulnerability_table(df):
+    """
+    One row per fighter-fight side (2 * len(df) rows, first half the
+    fighter_1 sides, second half the fighter_2 sides, each in
+    ['event_date', 'fight_url'] order), carrying for every area in
+    DEFENSIVE_VULNERABILITY_AREAS:
+      {a}_opp_attempts_now / {a}_opp_landed_now -- what this fighter's
+        opponent threw / landed at them in THIS fight;
+      {a}_expected_now -- opp_attempts_now x the opponent's prior offensive
+        accuracy (their own career history entering the fight, against
+        anyone, shrunk toward the era-local pooled rate with the accuracy
+        column's k) -- what a typical result against this opponent would be;
+      {a}_faced_before / {a}_landed_against_before / {a}_expected_before /
+        {a}_fights_before -- the fighter's cumulative totals ENTERING this
+        fight (fights = prior fights where the opponent threw >= 1 attempt).
+    Rebuilt from the raw landed/attempted columns, never from the stored
+    dynamic_*_defence columns: dynamic_td_defence is already shrunk, so
+    reading it would shrink twice, and the raw strike-defence columns have no
+    opponent- or era-adjustment.
+
+    The era-local rate is the pooled success rate over every fighter-side in
+    the ERA_WINDOW_YEARS strictly before the fight (falling back to all
+    rows strictly before, then to the whole df, when a window is empty). It
+    exists because raw success rates drift by era (opponent success at
+    distance rose from 0.361 in 2011-15 to 0.438 in 2021-26): against an
+    all-era population nearly every modern fighter would read "weak at
+    distance". Same-day doubleheaders resolve through the fight_url
+    tiebreak, as in every other state machine here.
+
+    Computed fresh from `df` every call, never cached (same as-of leakage
+    rule as _compute_robust_scale_reference).
+    """
+    d = df.copy()
+    d['event_date'] = pd.to_datetime(d['event_date'])
+    d = d.sort_values(['event_date', 'fight_url'], kind='stable').reset_index(drop=True)
+    n = len(d)
+
+    T = pd.DataFrame({
+        'fighter_url': np.concatenate([d['fighter_url_fighter_1'].values, d['fighter_url_fighter_2'].values]),
+        'event_date': np.concatenate([d['event_date'].values, d['event_date'].values]),
+        'fight_url': np.concatenate([d['fight_url'].values, d['fight_url'].values]),
+        'weight_class_cleaned': np.concatenate([d['weight_class_cleaned'].values, d['weight_class_cleaned'].values]),
+    })
+    T['pos'] = np.arange(2 * n)
+
+    order = T.sort_values(['fighter_url', 'event_date', 'fight_url', 'pos'], kind='stable').index.values
+    sorted_fighters = T['fighter_url'].values[order]
+
+    def cum_before(values):
+        s = pd.Series(np.asarray(values, dtype=float)[order])
+        entering = s.groupby(sorted_fighters).cumsum().values - s.values
+        out = np.empty(2 * n)
+        out[order] = entering
+        return out
+
+    dates = d['event_date'].values
+    unique_dates, inverse = np.unique(dates, return_inverse=True)
+    window_start = (pd.DatetimeIndex(dates) - pd.DateOffset(years=VULNERABILITY_ERA_WINDOW_YEARS)).values
+    hi = np.searchsorted(unique_dates, dates, side='left')
+    lo = np.searchsorted(unique_dates, window_start, side='left')
+
+    for area, (landed_stem, attempted_stem, defence_key, accuracy_key) in DEFENSIVE_VULNERABILITY_AREAS.items():
+        landed_1 = d[f'{landed_stem}_fighter_1'].fillna(0).values.astype(float)
+        landed_2 = d[f'{landed_stem}_fighter_2'].fillna(0).values.astype(float)
+        att_1 = d[f'{attempted_stem}_fighter_1'].fillna(0).values.astype(float)
+        att_2 = d[f'{attempted_stem}_fighter_2'].fillna(0).values.astype(float)
+
+        own_landed = np.concatenate([landed_1, landed_2])
+        own_att = np.concatenate([att_1, att_2])
+        opp_landed = np.concatenate([landed_2, landed_1])
+        opp_att = np.concatenate([att_2, att_1])
+
+        prefix_landed = np.concatenate([[0.0], np.cumsum(np.bincount(inverse, weights=landed_1 + landed_2,
+                                                                      minlength=len(unique_dates)))])
+        prefix_att = np.concatenate([[0.0], np.cumsum(np.bincount(inverse, weights=att_1 + att_2,
+                                                                   minlength=len(unique_dates)))])
+        window_att = prefix_att[hi] - prefix_att[lo]
+        before_att = prefix_att[hi]
+        whole_rate = prefix_landed[-1] / prefix_att[-1] if prefix_att[-1] > 0 else np.nan
+        with np.errstate(divide='ignore', invalid='ignore'):
+            era_rate = np.where(window_att > 0, (prefix_landed[hi] - prefix_landed[lo]) / window_att,
+                                np.where(before_att > 0, prefix_landed[hi] / before_att, whole_rate))
+        era_rate = np.concatenate([era_rate, era_rate])
+
+        own_landed_before = cum_before(own_landed)
+        own_att_before = cum_before(own_att)
+        opp_landed_before = np.concatenate([own_landed_before[n:], own_landed_before[:n]])
+        opp_att_before = np.concatenate([own_att_before[n:], own_att_before[:n]])
+
+        k_off = SIMILARITY_EXPOSURE_SPEC[accuracy_key][2]
+        opponent_prior_accuracy = _shrink_rate(opp_landed_before, opp_att_before, k_off, era_rate)
+        expected_now = opp_att * opponent_prior_accuracy
+
+        T[f'{area}_opp_attempts_now'] = opp_att
+        T[f'{area}_opp_landed_now'] = opp_landed
+        T[f'{area}_expected_now'] = expected_now
+        T[f'{area}_faced_before'] = cum_before(opp_att)
+        T[f'{area}_landed_against_before'] = cum_before(opp_landed)
+        T[f'{area}_expected_before'] = cum_before(expected_now)
+        T[f'{area}_fights_before'] = cum_before((opp_att > 0).astype(float))
+    return T
+
+
+def _defensive_vulnerability_population(df_scoped):
+    """The scoped table plus everything a per-fighter score needs from the
+    population: pooled opponent success per area (p_bar) and the pre-fight
+    log-ratio population the z-scores are referenced against (gated to
+    labelable rows, division-scoped through
+    _compute_robust_center_scale_reference)."""
+    T = _compute_defensive_vulnerability_table(df_scoped)
+    n = len(T) // 2
+    p_bar, reference_columns = {}, {}
+    temp = pd.DataFrame({'weight_class_cleaned': T['weight_class_cleaned'].values[:n]})
+    for area, (_, _, defence_key, _) in DEFENSIVE_VULNERABILITY_AREAS.items():
+        p_bar[area] = T[f'{area}_opp_landed_now'].sum() / T[f'{area}_opp_attempts_now'].sum()
+        k_def = SIMILARITY_EXPOSURE_SPEC[defence_key][2]
+        faced = T[f'{area}_faced_before'].values
+        ratio = _shrink_rate(T[f'{area}_landed_against_before'].values, T[f'{area}_expected_before'].values,
+                             k_def * p_bar[area], 1.0)
+        weight = faced / (faced + k_def)
+        labelable = ((faced > 0) & (weight >= VULNERABILITY_LABEL_MIN_EVIDENCE_WEIGHT)
+                     & (T[f'{area}_fights_before'].values >= VULNERABILITY_LABEL_MIN_FIGHTS))
+        log_ratio = np.where(labelable, np.log(ratio), np.nan)
+        reference_columns[area] = f'{area}_log_vulnerability'
+        temp[f'{area}_log_vulnerability_fighter_1'] = log_ratio[:n]
+        temp[f'{area}_log_vulnerability_fighter_2'] = log_ratio[n:]
+    return {'T': T, 'p_bar': p_bar, 'temp': temp, 'reference_columns': reference_columns, 'reference_cache': {}}
+
+
+def _score_defensive_vulnerability(population, fighter_url, fighter_name):
+    T = population['T']
+    rows = T[T['fighter_url'] == fighter_url].sort_values(['event_date', 'fight_url'])
+    latest = rows.iloc[-1]
+    weight_class = latest['weight_class_cleaned']
+    if weight_class not in population['reference_cache']:
+        population['reference_cache'][weight_class] = _compute_robust_center_scale_reference(
+            population['temp'], list(population['reference_columns'].values()), weight_class)
+    reference = population['reference_cache'][weight_class]
+
+    out = []
+    for area, (_, _, defence_key, _) in DEFENSIVE_VULNERABILITY_AREAS.items():
+        k_def = SIMILARITY_EXPOSURE_SPEC[defence_key][2]
+        attempts_now = latest[f'{area}_opp_attempts_now']
+        faced = latest[f'{area}_faced_before'] + attempts_now
+        against = latest[f'{area}_landed_against_before'] + latest[f'{area}_opp_landed_now']
+        expected = latest[f'{area}_expected_before'] + latest[f'{area}_expected_now']
+        fights = latest[f'{area}_fights_before'] + (1.0 if attempts_now > 0 else 0.0)
+        weight = faced / (faced + k_def) if faced > 0 else 0.0
+
+        ratio = z = np.nan
+        if faced > 0:
+            ratio = _shrink_rate(against, expected, k_def * population['p_bar'][area], 1.0)
+            median, scale = reference[population['reference_columns'][area]]
+            z = (np.log(ratio) - median) / scale if pd.notna(scale) and scale != 0 else np.nan
+
+        if faced == 0:
+            label = None
+        elif weight < VULNERABILITY_LABEL_MIN_EVIDENCE_WEIGHT or fights < VULNERABILITY_LABEL_MIN_FIGHTS or pd.isna(z):
+            label = 'insufficient evidence'
+        elif z >= VULNERABILITY_LABEL_Z:
+            label = 'weak'
+        elif z <= -VULNERABILITY_LABEL_Z:
+            label = 'strong'
+        else:
+            label = 'typical'
+
+        career_faced = rows[f'{area}_opp_attempts_now']
+        max_fight_share = (career_faced.max() / career_faced.sum()
+                           if career_faced.sum() >= VULNERABILITY_MAX_FIGHT_SHARE_MIN_ATTEMPTS else np.nan)
+
+        out.append({
+            'fighter': fighter_name, 'fighter_url': fighter_url, 'weight_class_cleaned': weight_class,
+            'through_date': pd.Timestamp(latest['event_date']).strftime('%Y-%m-%d'), 'area': area,
+            'attempts_faced': faced, 'landed_against': against, 'expected_landed_against': round(expected, 3),
+            'vulnerability_ratio': round(ratio, 3) if pd.notna(ratio) else np.nan,
+            'vulnerability_z': round(z, 3) if pd.notna(z) else np.nan,
+            'evidence_weight': round(weight, 3), 'fights_with_exposure': int(fights),
+            'max_fight_share': round(max_fight_share, 3) if pd.notna(max_fight_share) else np.nan,
+            'vulnerability_label': label,
+        })
+    return pd.DataFrame(out)
+
+
+def assess_defensive_vulnerability(df, fighter_name, as_of=None):
+    """
+    Where a fighter concedes, as a six-row vector (takedown, distance,
+    clinch, ground, leg, body) -- not a scalar: these are near-unrelated
+    skills (takedown defence correlates -0.04 to 0.25 with every other area,
+    and no pair of areas exceeds 0.50)
+    and the later "opponent strong where this fighter is weak" question
+    needs the area, not an average. Complements classify_fighter_archetype,
+    which describes style PREFERENCE: a low grappling_orientation says a
+    fighter chooses not to grapple, not that they can't defend it.
+
+    Per area, vulnerability_ratio is what the fighter has conceded divided by
+    what those specific opponents would normally be expected to land in that
+    era (observed / expected), shrunk toward 1.0 once with _shrink_rate and
+    the existing SIMILARITY_EXPOSURE_SPEC k; vulnerability_z is its log
+    z-scored against the division's own labelable population
+    (_compute_robust_center_scale_reference). Higher = weaker; a ratio of
+    1.20 means the fighter concedes 20% more than expected. attempts_faced
+    is opponent attempts thrown at them; evidence_weight = faced / (faced + k)
+    is a weighting constant, not a measured reliability (strikes cluster
+    within fights, so real split-half reliability is well below what it
+    implies -- which is why the label is also gated on fights).
+
+    vulnerability_label is 'weak' (z >= 1), 'strong' (z <= -1) or 'typical'
+    only when evidence_weight >= 0.5 AND the fighter has >= 3 fights with
+    exposure in that area; otherwise 'insufficient evidence'; None when
+    nothing has been faced (ratio and z are then NaN). max_fight_share is the
+    largest single fight's share of attempts faced (NaN below 5 total) --
+    flags a score resting on one fight.
+
+    The state includes the fighter's LATEST fight (unlike
+    generate_fighter_profile, whose dynamic_* values are the state entering
+    it). as_of scopes the dataset first, so the result equals a call on the
+    pre-as_of df exactly and never sees later rows.
+
+    Caveats that travel with the score: (a) it measures what a fighter
+    concedes PER ATTEMPT -- not how often they're attacked or whether they
+    win the exchange; (b) clinch and ground partly reflect choosing to trade
+    in that position (Valentina Shevchenko, fighter_url=132deb59abae64b1,
+    reads clinch-weak across many fights, largest single-fight share 0.19);
+    (c) an opponent with little UFC history is represented only by the era
+    rate, so a schedule of debutants gets era adjustment but little quality
+    adjustment; (d) pre-2006 fights are thin; (e) takedown only: success per
+    attempt falls as attempts within a fight rise (observed/expected 1.10
+    at one attempt, 0.86 at eight or more, since opponents who chain-shoot
+    land a smaller share), so a fighter whose exposure comes mostly from
+    high-attempt fights reads slightly stronger (about -0.3 z for a record
+    built entirely from 8+ attempt fights) and a record of single-attempt
+    fights slightly weaker (about +0.4 z); (f) opponent/era adjustment removes most but not all era
+    drift: pre-2016 rows still read stronger (distance strong-flag share
+    26.7% in 2006-10 vs 10.5% in 2021-26), so historical comparisons need
+    their own era control. Clinch is the weakest area on evidence as well as
+    construct validity: its held-out persistence on modern careers is 0.34
+    log-lik per 1k attempts, 0.11 once next-fight attempts are controlled.
+
+    Raises ValueError if the fighter has no fights in df (before as_of), or
+    if the name maps to more than one fighter_url (two distinct fighters
+    sharing a name -- resolve by scoping df).
+    """
+    df_scoped = df
+    if as_of is not None:
+        df_scoped = df[pd.to_datetime(df['event_date']) < pd.to_datetime(as_of)]
+
+    urls = set(df_scoped.loc[df_scoped['fighter_1'] == fighter_name, 'fighter_url_fighter_1']) | \
+           set(df_scoped.loc[df_scoped['fighter_2'] == fighter_name, 'fighter_url_fighter_2'])
+    if not urls:
+        raise ValueError(f"No fights found for fighter '{fighter_name}'"
+                         + (f" before {pd.to_datetime(as_of).date()}" if as_of is not None else ""))
+    if len(urls) > 1:
+        raise ValueError(f"'{fighter_name}' maps to {len(urls)} distinct fighter_urls: {sorted(urls)}")
+
+    population = _defensive_vulnerability_population(df_scoped)
+    return _score_defensive_vulnerability(population, urls.pop(), fighter_name)
 
 
 '''15. Fighter trajectory (declining / stable / improving)'''
