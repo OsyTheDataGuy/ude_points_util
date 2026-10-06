@@ -54,28 +54,28 @@ Per fighter-side, per fight, in order: `raw_base_points` (±3 W/L) → `champion
 
 | Rank | Fighter | Record | Fights | Career Gain | Shrunk Rate |
 |---|---|---|---|---|---|
-| 1 | Jon Jones | 22-1-0 | 24 | 160.4 | 4.377 |
-| 2 | Georges St-Pierre | 20-2-0 | 22 | 151.2 | 4.363 |
-| 3 | Islam Makhachev | 18-1-0 | 19 | 118.0 | 3.670 |
-| 4 | Demetrious Johnson | 15-2-1 | 18 | 94.7 | 2.969 |
-| 5 | Amanda Nunes | 16-2-0 | 18 | 91.4 | 2.853 |
-| 6 | Valentina Shevchenko | 15-3-1 | 19 | 87.8 | 2.628 |
-| 7 | Khabib Nurmagomedov | 13-0-0 | 13 | 69.5 | 2.519 |
-| 8 | Alexander Volkanovski | 15-3-0 | 18 | 80.2 | 2.451 |
-| 9 | Merab Dvalishvili | 14-3-0 | 17 | 63.8 | 1.937 |
-| 10 | Alex Pereira | 10-3-0 | 13 | 55.2 | 1.899 |
-| 11 | Ilia Topuria | 9-1-0 | 10 | 48.5 | 1.848 |
-| 12 | Dricus Du Plessis | 10-1-0 | 11 | 49.5 | 1.809 |
-| 13 | Daniel Cormier | 11-3-0 | 15 | 55.9 | 1.774 |
-| 14 | Francis Ngannou | 12-2-0 | 14 | 51.4 | 1.659 |
-| 15 | Justin Gaethje | 11-5-0 | 16 | 53.3 | 1.607 |
-| 16 | Kamaru Usman | 16-4-0 | 20 | 56.7 | 1.505 |
-| 17 | Khamzat Chimaev | 9-1-0 | 10 | 40.8 | 1.465 |
-| 18 | Movsar Evloev | 10-0-0 | 10 | 40.8 | 1.462 |
-| 19 | Benson Henderson | 11-3-0 | 14 | 45.8 | 1.428 |
-| 20 | Alexandre Pantoja | 14-4-0 | 18 | 50.8 | 1.401 |
+| 1 | Georges St-Pierre | 20-2-0 | 22 | 150.7 | 4.351 |
+| 2 | Jon Jones | 22-1-0 | 24 | 156.5 | 4.264 |
+| 3 | Islam Makhachev | 18-1-0 | 19 | 118.0 | 3.672 |
+| 4 | Demetrious Johnson | 15-2-1 | 18 | 94.7 | 2.971 |
+| 5 | Amanda Nunes | 16-2-0 | 18 | 91.4 | 2.856 |
+| 6 | Valentina Shevchenko | 15-3-1 | 19 | 87.7 | 2.629 |
+| 7 | Khabib Nurmagomedov | 13-0-0 | 13 | 69.5 | 2.522 |
+| 8 | Alexander Volkanovski | 15-3-0 | 18 | 80.2 | 2.453 |
+| 9 | Merab Dvalishvili | 14-3-0 | 17 | 63.8 | 1.939 |
+| 10 | Alex Pereira | 10-3-0 | 13 | 54.1 | 1.852 |
+| 11 | Ilia Topuria | 9-1-0 | 10 | 48.5 | 1.850 |
+| 12 | Dricus Du Plessis | 10-1-0 | 11 | 49.6 | 1.813 |
+| 13 | Daniel Cormier | 11-3-0 | 15 | 55.9 | 1.776 |
+| 14 | Francis Ngannou | 12-2-0 | 14 | 51.4 | 1.662 |
+| 15 | Justin Gaethje | 11-5-0 | 16 | 53.3 | 1.610 |
+| 16 | Joshua Van | 11-1-0 | 12 | 46.5 | 1.592 |
+| 17 | Kamaru Usman | 16-4-0 | 20 | 56.7 | 1.507 |
+| 18 | Khamzat Chimaev | 9-1-0 | 10 | 40.8 | 1.468 |
+| 19 | Movsar Evloev | 10-0-0 | 10 | 40.6 | 1.455 |
+| 20 | Benson Henderson | 11-3-0 | 14 | 45.7 | 1.425 |
 
-623 fighters clear the `n_fights >= 10` floor. Topuria, Chimaev, and Evloev sit right at it (10 fights); Du Plessis (11) and Pereira (13) aren't far behind. Jones's #1 spot rests on `is_champion_fighter_1`/`_2` and `title_defenses_fighter_1`/`_2` correctly distinguishing an interim title reign from an undisputed one. Kamaru Usman (`fighter_url=f1b2aa7853d1ed6e`) and Khamzat Chimaev (`fighter_url=767755fd74662dbf`) sit in the top 20; Aljamain Sterling (`fighter_url=cb696ebfb6598724`) and Petr Yan (`fighter_url=d661ce4da776fc20`) do not.
+627 fighters clear the `n_fights >= 10` floor. Topuria, Chimaev, and Evloev sit right at it (10 fights); Du Plessis (11) and Pereira (13) aren't far behind. St-Pierre's #1 spot over Jones rests on `is_champion_fighter_1`/`_2` and `title_defenses_fighter_1`/`_2` correctly distinguishing an interim reign from an undisputed one *and* ending an undisputed reign when the holder is stripped or vacates (Jones's 8–11 defenses reset after 2015, so they no longer carry into his 2019–2020 title fights). Kamaru Usman (`fighter_url=f1b2aa7853d1ed6e`) and Khamzat Chimaev (`fighter_url=767755fd74662dbf`) sit in the top 20; Aljamain Sterling (`fighter_url=cb696ebfb6598724`) and Petr Yan (`fighter_url=d661ce4da776fc20`) do not.
 
 ---
 
