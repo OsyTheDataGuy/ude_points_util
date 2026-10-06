@@ -67,6 +67,7 @@ def update_champion_status(df):
     """
     champ_1, champ_2 = [], []
     fighter_champions = {}
+    undisputed_holders = {}  # weight class -> fighters currently flagged 2
 
     for row in df.itertuples(index=False):
         is_tb = getattr(row, 'is_title_bout', 0)
@@ -85,6 +86,18 @@ def update_champion_status(df):
         champ_1.append(c1_status)
         champ_2.append(c2_status)
 
+        # Only one fighter can hold an undisputed belt: an undisputed title bout
+        # in this division that doesn't involve a flagged holder proves he no
+        # longer holds it (stripped/vacated -- the source has no such event).
+        # Applies whatever the bout's result (draw/NC still crown no new holder
+        # but the belt was contested, so a non-participant can't still be it).
+        # Interim flags (1) are deliberately untouched.
+        if is_tb == 2:
+            holders = undisputed_holders.setdefault(wc, set())
+            for stale in [h for h in holders if h not in (f1, f2)]:
+                fighter_champions[stale][wc]['status'] = 0
+                holders.discard(stale)
+
         # Update status after capturing current fight status
         if is_tb > 0:
             if r1 == 'W':
@@ -96,6 +109,13 @@ def update_champion_status(df):
                 fighter_champions[f2][wc]['status'] = 1 if is_tb == 1 else 2
             elif r2 == 'L':
                 fighter_champions[f2][wc]['status'] = 0
+
+            holders = undisputed_holders.setdefault(wc, set())
+            for f in (f1, f2):
+                if fighter_champions[f][wc]['status'] == 2:
+                    holders.add(f)
+                else:
+                    holders.discard(f)
 
     new_cols = {
         'is_champion_fighter_1': champ_1,
@@ -125,6 +145,11 @@ def update_title_defenses(df):
         if wc not in fighter_defenses[f1]: fighter_defenses[f1][wc] = 0
         if f2 not in fighter_defenses: fighter_defenses[f2] = {}
         if wc not in fighter_defenses[f2]: fighter_defenses[f2][wc] = 0
+
+        # A fighter entering without a belt has no reign: a stripped/vacated
+        # champion's old defense count must not carry into a later fight.
+        if champ1 == 0: fighter_defenses[f1][wc] = 0
+        if champ2 == 0: fighter_defenses[f2][wc] = 0
 
         cur_def1 = fighter_defenses[f1][wc]
         cur_def2 = fighter_defenses[f2][wc]
