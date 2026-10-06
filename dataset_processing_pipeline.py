@@ -410,15 +410,17 @@ def validate_transformed_data(df: pd.DataFrame, max_null_pct: float = 0.05, verb
     # 5. Join Leakage Check (Excessive Nulls in Critical Columns)
     critical_cols = ['event_date', 'Height (m)_fighter_1', 'date_of_birth_fighter_1']
     null_warnings = 0
+    null_details = []
     for col in critical_cols:
         if col in df.columns:
             null_pct = df[col].isna().mean()
             if null_pct > max_null_pct:
                 null_warnings += 1
+                null_details.append(f"{col} {null_pct:.1%} ({int(df[col].isna().sum())}/{len(df)} rows)")
                 warnings.warn(f"Data Quality Warning: '{col}' has {null_pct:.1%} null values (exceeds threshold of {max_null_pct:.1%}).")
     checks_executed += 1
     if verbose:
-        status = f"✓ [PASS] Join Coverage (<{max_null_pct:.0%} Nulls)" if null_warnings == 0 else f"⚠️ [WARN] Join Coverage ({null_warnings} columns exceeded null threshold)"
+        status = f"✓ [PASS] Join Coverage (<{max_null_pct:.0%} Nulls)" if null_warnings == 0 else f"⚠️ [WARN] Join Coverage ({null_warnings} columns exceeded null threshold: {'; '.join(null_details)})"
         print(status)
 
     # 6. No Duplicate vs. History (only runs if current_dataset supplied)
