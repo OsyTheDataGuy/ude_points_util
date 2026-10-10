@@ -72,7 +72,7 @@ def update_champion_status(df):
     for row in df.itertuples(index=False):
         is_tb = getattr(row, 'is_title_bout', 0)
         wc = getattr(row, 'weight_class_cleaned', '')
-        f1, f2 = row.fighter_1, row.fighter_2
+        f1, f2 = row.fighter_url_fighter_1, row.fighter_url_fighter_2  # by fighter, not name
         r1, r2 = row.fight_result_fighter_1, row.fight_result_fighter_2
 
         if f1 not in fighter_champions: fighter_champions[f1] = {}
@@ -136,7 +136,7 @@ def update_title_defenses(df):
     for row in df.itertuples(index=False):
         is_tb = getattr(row, 'is_title_bout', 0)
         wc = getattr(row, 'weight_class_cleaned', '')
-        f1, f2 = row.fighter_1, row.fighter_2
+        f1, f2 = row.fighter_url_fighter_1, row.fighter_url_fighter_2  # by fighter, not name
         r1, r2 = row.fight_result_fighter_1, row.fight_result_fighter_2
         champ1 = getattr(row, 'is_champion_fighter_1', 0)
         champ2 = getattr(row, 'is_champion_fighter_2', 0)
@@ -196,7 +196,7 @@ def update_fight_records(df):
     fighter_records = {}
 
     for row in df.itertuples(index=False):
-        f1, f2 = row.fighter_1, row.fighter_2
+        f1, f2 = row.fighter_url_fighter_1, row.fighter_url_fighter_2  # by fighter, not name
         r1, r2 = row.fight_result_fighter_1, row.fight_result_fighter_2
 
         if f1 not in fighter_records: fighter_records[f1] = initialize_fighter_record()
@@ -278,7 +278,7 @@ def update_win_streaks(df):
     fighter_streaks = {}
 
     for row in df.itertuples(index=False):
-        f1, f2 = row.fighter_1, row.fighter_2
+        f1, f2 = row.fighter_url_fighter_1, row.fighter_url_fighter_2  # by fighter, not name
         r1, r2 = row.fight_result_fighter_1, row.fight_result_fighter_2
 
         if f1 not in fighter_streaks: fighter_streaks[f1] = 0
@@ -317,7 +317,7 @@ def update_career_means(df):
     fighter_stats = {}
 
     for row in df.itertuples(index=False):
-        f1, f2 = row.fighter_1, row.fighter_2
+        f1, f2 = row.fighter_url_fighter_1, row.fighter_url_fighter_2  # by fighter, not name
 
         for f in [f1, f2]:
             if f not in fighter_stats:
@@ -393,7 +393,9 @@ def map_fight_method(result):
 """## 9. Create rematch column"""
 
 def add_rematch_features(df):
-    pairs = [tuple(sorted([f1, f2])) for f1, f2 in zip(df['fighter_1'], df['fighter_2'])]
+    # Pairs are keyed by fighter_url, so a renamed fighter's rematch is still
+    # a rematch and two fighters who share a name aren't one pair.
+    pairs = [tuple(sorted([f1, f2])) for f1, f2 in zip(df['fighter_url_fighter_1'], df['fighter_url_fighter_2'])]
     pair_series = pd.Series(pairs, index=df.index)
     rematch_col = pair_series.groupby(pair_series).cumcount()
     is_rematch = (rematch_col > 0).astype(int)
