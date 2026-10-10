@@ -2822,13 +2822,20 @@ def find_most_similar_past_opponents(df, fighter_name, future_opponent_name, exc
 
     Returns (physical_similarity_df, style_similarity_df), each sorted
     most-similar-first via total_difference (NaN, i.e. under-covered, rows
-    last).
+    last). Raises ValueError if either fighter has no fights in df (before
+    as_of) -- e.g. a UFC debut, or a misspelled name.
     """
     if as_of is not None:
         df = df[pd.to_datetime(df['event_date']) < pd.to_datetime(as_of)]
 
     future_profile = generate_fighter_profile(df, future_opponent_name)
     career_dataset = create_fighter_career_dataset(df, fighter_name)
+    if career_dataset.empty:
+        # create_fighter_career_dataset returns its unprocessed empty input
+        # (see its own guard), which has no opponent_* columns -- without this
+        # a debut fighter or a misspelled name surfaces as KeyError below.
+        raise ValueError(f"No fights found for fighter '{fighter_name}'"
+                         + (f" before {pd.to_datetime(as_of).date()}" if as_of is not None else ""))
 
     if exclude_future_opponent:
         future_opponent_url = future_profile['fighter_url'].values[0]

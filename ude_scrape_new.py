@@ -63,6 +63,20 @@ def exclude_dataless_events(df: pd.DataFrame) -> pd.DataFrame:
     old to have detailed stats on UFCStats.com)."""
     return df[~df['EVENT'].isin(to_be_excluded_hardcoded_list)]
 
+# Event series that are out of the dataset's scope, matched case-insensitively
+# as substrings of EVENT so new events in the series are caught without a list
+# update. Road to UFC is a contender tournament, not a UFC card; greco1899's
+# ufc_event_details.csv carries none of its events, so unfiltered they fail the
+# ETL's event-date join and are re-scraped and dropped on every refresh.
+OUT_OF_SCOPE_EVENT_PATTERNS = ['road to ufc']
+
+def exclude_out_of_scope_events(df: pd.DataFrame) -> pd.DataFrame:
+    """Drops rows whose EVENT matches any OUT_OF_SCOPE_EVENT_PATTERNS."""
+    out = df['EVENT'].str.lower().str.contains('|'.join(OUT_OF_SCOPE_EVENT_PATTERNS), regex=True, na=False)
+    if out.any():
+        print(f"Excluded {int(out.sum())} out-of-scope fight(s): {sorted(df.loc[out, 'EVENT'].unique())}")
+    return df[~out]
+
 """## 1.2 Start Scrape for Fight Data"""
 
 # Create function that takes two dataframes -- fight_details and previous_complete -- and returns fight_details where 'URL' is not in previous_complete['fight_url'].
@@ -451,6 +465,7 @@ def run_fight_scrape(fight_details_csv, current_dataset_csv, output_csv='scraped
                       batch_save=100):
     latest_fights = pd.read_csv(fight_details_csv)
     latest_fights = exclude_dataless_events(latest_fights)
+    latest_fights = exclude_out_of_scope_events(latest_fights)
     current_dataset = pd.read_csv(current_dataset_csv)
 
     latest_fights_data = scrape_fight_details_to_csv(latest_fights, current_dataset, batch_save=batch_save)
