@@ -128,6 +128,22 @@ def test_shared_name_raises_and_ids_work(df):
     assert len(u.create_fighter_career_dataset(before, '294aa73dbf37d281')) == 12
 
 
+@pytest.mark.parametrize('fight_id, fighter_id, record', [
+    # Waldo Cortes Acosta's first fight under his new name: 7-2-0 carried
+    # over, not a fresh 0-0-0.
+    ('9d9390b550d77e06', 'fc08099550072fe4', '7-2-0 0'),
+    # Bruno Silva 12ebd7d157e91701's UFC debut: 0-0-0, not the other Bruno
+    # Silva's record.
+    ('bb1ac382e0277b3f', '12ebd7d157e91701', '0-0-0 0'),
+])
+def test_pipeline_records_follow_fighter_url(df, fight_id, fighter_id, record):
+    # The stored pre-fight record comes from the feature pipeline's state
+    # machine, which must track fighters by fighter_url.
+    row = df[df['fight_url'].str.endswith(fight_id)].iloc[0]
+    side = 'fighter_1' if row['fighter_url_fighter_1'].endswith(fighter_id) else 'fighter_2'
+    assert row[f'pre_fight_record_{side}_(W-L-D NC)'] == record
+
+
 def test_rankings_keep_shared_name_fighters_apart(df):
     # Grouping by name used to merge the two Bruno Silvas into one row.
     names = set(u.with_one_name_per_fighter(df)['fighter_1'])
@@ -256,4 +272,4 @@ def test_goat_ranking_top3(df):
         '07f72a2a7591b409',  # Jon Jones
         '275aca31f61ba28c',  # Islam Makhachev
     ]
-    assert top3['shrunk_rate'].round(3).tolist() == [4.351, 4.264, 3.672]
+    assert top3['shrunk_rate'].round(3).tolist() == [4.350, 4.264, 3.673]

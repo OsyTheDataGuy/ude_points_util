@@ -55,22 +55,22 @@ Per fighter-side, per fight, in order: `raw_base_points` (±3 W/L) → `champion
 
 | Rank | Fighter | Record | Fights | Career Gain | Shrunk Rate |
 |---|---|---|---|---|---|
-| 1 | Georges St-Pierre | 20-2-0 | 22 | 150.7 | 4.351 |
+| 1 | Georges St-Pierre | 20-2-0 | 22 | 150.7 | 4.350 |
 | 2 | Jon Jones | 22-1-0 | 24 | 156.5 | 4.264 |
-| 3 | Islam Makhachev | 18-1-0 | 19 | 118.0 | 3.672 |
+| 3 | Islam Makhachev | 18-1-0 | 19 | 118.0 | 3.673 |
 | 4 | Demetrious Johnson | 15-2-1 | 18 | 94.7 | 2.971 |
 | 5 | Amanda Nunes | 16-2-0 | 18 | 91.4 | 2.856 |
 | 6 | Valentina Shevchenko | 15-3-1 | 19 | 87.7 | 2.629 |
 | 7 | Khabib Nurmagomedov | 13-0-0 | 13 | 69.5 | 2.522 |
 | 8 | Alexander Volkanovski | 15-3-0 | 18 | 80.2 | 2.453 |
 | 9 | Merab Dvalishvili | 14-3-0 | 17 | 63.8 | 1.939 |
-| 10 | Alex Pereira | 10-3-0 | 13 | 54.1 | 1.852 |
+| 10 | Alex Pereira | 10-3-0 | 13 | 54.1 | 1.853 |
 | 11 | Ilia Topuria | 9-1-0 | 10 | 48.5 | 1.850 |
 | 12 | Dricus Du Plessis | 10-1-0 | 11 | 49.6 | 1.813 |
 | 13 | Daniel Cormier | 11-3-0 | 15 | 55.9 | 1.776 |
 | 14 | Francis Ngannou | 12-2-0 | 14 | 51.4 | 1.662 |
-| 15 | Justin Gaethje | 11-5-0 | 16 | 53.3 | 1.610 |
-| 16 | Joshua Van | 11-1-0 | 12 | 46.5 | 1.592 |
+| 15 | Joshua Van | 11-1-0 | 12 | 47.2 | 1.625 |
+| 16 | Justin Gaethje | 11-5-0 | 16 | 53.3 | 1.610 |
 | 17 | Kamaru Usman | 16-4-0 | 20 | 56.7 | 1.507 |
 | 18 | Khamzat Chimaev | 9-1-0 | 10 | 40.8 | 1.468 |
 | 19 | Movsar Evloev | 10-0-0 | 10 | 40.6 | 1.455 |
@@ -110,7 +110,7 @@ Two computed-but-unconsumed-by-scoring pathways are retained deliberately, not d
 ---
 
 ## 4. Career Trajectories & Utilities
-`ude_points_utils.create_fighter_career_dataset` converts the two-sided fight dataframe into fighter-specific career trajectories. Fighters are matched by `fighter_url`, not name: every function that takes a fighter accepts any name they have fought under, a full `fighter_url`, or its 16-character id (`resolve_fighter_url`; a name two fighters share raises), and functions that group by name relabel first (`with_one_name_per_fighter`). The scoring pipeline still keys by name — an open item, see `data_integrity_and_invariants.md`.
+`ude_points_utils.create_fighter_career_dataset` converts the two-sided fight dataframe into fighter-specific career trajectories. Fighters are matched by `fighter_url`, not name: every function that takes a fighter accepts any name they have fought under, a full `fighter_url`, or its 16-character id (`resolve_fighter_url`; a name two fighters share raises), and functions that group by name relabel first (`with_one_name_per_fighter`). The feature pipeline's state machines (records, streaks, champion status, title defenses, career means, rematches) and the scoring ledger key on `fighter_url` as well.
 ```text
 fight-level dataset 
         ↓
@@ -122,7 +122,7 @@ ranking / historical analysis / visualization
 ### 4a. Rankings
 `rank_fighters_by_shrunk_ude_rate` is the locked GOAT ranking (§2a). `rank_fighters_by_shrunk_ude_rate_by_weight_class(df, weight_class=None, start_year=None, end_year=None, prior_strength=10.0, min_fights=None)` is a thin wrapper — `filter_by_weight_class`/`filter_by_year` pre-filter, then the unchanged ranking function runs on the filtered population, so the shrinkage target (`population_mean_rate`) is the *division's own* mean rate, not the promotion-wide one. `filter_by_weight_class` deliberately does not also require both fighters in a fight to individually clear a fight-count floor in that division: doing so would drop fights against one-off opponents entirely, undercounting a fighter's real fight total in that division. The fight-count floor lives solely in the ranking function's own `min_fights`, applied post-scoring on the fighter actually being ranked.
 
-**Why shrunk per-fight rate, not raw cumulative career points:** `career_point_gain` (cumulative UDE points earned) rewards volume as much as quality. Figures below are from `current_df.csv` through 2026-10-03. Dustin Poirier (`fighter_url=029eaff01e6bb8f0`, 32 fights) ranks #34 by raw cumulative total but only #65 by shrunk rate, because a below-average per-fight rate (1.16, vs. Georges St-Pierre's (`fighter_url=6506c1d34da9c013`) 6.85) compounds into a large total purely by fighting more times. Dividing by `n_fights` (`raw_rate`) fixes that but creates the opposite problem at the other end: Bas Rutten (`fighter_url=03688dc3c3af3ac1`) posts `raw_rate` 6.28 off a single fight — the highest of the 330 one-fight careers and close to St-Pierre's 22-fight rate — a sample far too small to trust as a "true" rate. Bayesian shrinkage resolves both at once: `shrunk_rate` is a weighted average of a fighter's own `raw_rate` and the population's `population_mean_rate` (the unweighted mean `raw_rate` of all 2,570 scored fighters, −1.15 — dragged negative because the 39.2% with 3 or fewer fights average −2.31, and most short UFC careers end on a loss), weighted by `n_fights` vs. `prior_strength` (10.0, in equivalent-fights units). A 1-fight career is pulled almost entirely to the population mean (Rutten: 6.28 → −0.47); St-Pierre's 22 fights outweigh the 10-fight prior roughly 2-to-1, so he keeps most of his rate (6.85 → 4.35). Shrinkage alone still isn't a complete fix at the margin: Shavkat Rakhmonov's (`fighter_url=01afe0916a40c7c5`) 7-fight `shrunk_rate` would rank him #31 overall without a floor, ahead of 279 of the 297 fighters with 15+ fights — which is why `min_fights=10` exists as a hard floor on top of the shrinkage.
+**Why shrunk per-fight rate, not raw cumulative career points:** `career_point_gain` (cumulative UDE points earned) rewards volume as much as quality. Figures below are from `current_df.csv` through 2026-10-03. Dustin Poirier (`fighter_url=029eaff01e6bb8f0`, 32 fights) ranks #34 by raw cumulative total but only #66 by shrunk rate, because a below-average per-fight rate (1.16, vs. Georges St-Pierre's (`fighter_url=6506c1d34da9c013`) 6.85) compounds into a large total purely by fighting more times. Dividing by `n_fights` (`raw_rate`) fixes that but creates the opposite problem at the other end: Bas Rutten (`fighter_url=03688dc3c3af3ac1`) posts `raw_rate` 6.28 off a single fight — the highest of the 330 one-fight careers and close to St-Pierre's 22-fight rate — a sample far too small to trust as a "true" rate. Bayesian shrinkage resolves both at once: `shrunk_rate` is a weighted average of a fighter's own `raw_rate` and the population's `population_mean_rate` (the unweighted mean `raw_rate` of all 2,570 scored fighters, −1.15 — dragged negative because the 39.2% with 3 or fewer fights average −2.31, and most short UFC careers end on a loss), weighted by `n_fights` vs. `prior_strength` (10.0, in equivalent-fights units). A 1-fight career is pulled almost entirely to the population mean (Rutten: 6.28 → −0.47); St-Pierre's 22 fights outweigh the 10-fight prior roughly 2-to-1, so he keeps most of his rate (6.85 → 4.35). Shrinkage alone still isn't a complete fix at the margin: Shavkat Rakhmonov's (`fighter_url=01afe0916a40c7c5`) 7-fight `shrunk_rate` would rank him #31 overall without a floor, ahead of 279 of the 297 fighters with 15+ fights — which is why `min_fights=10` exists as a hard floor on top of the shrinkage.
 
 ### 4b. Fighter status
 `create_fighter_status_dataset(df, as_of=None)` — active/inactive per fighter (fought within 730 days of `as_of`). `as_of` defaults to `datetime.now()`, making the result non-deterministic across runs by design (unlike everything else in this project, "is this fighter still active" is genuinely an as-of-today question) — pass `as_of` explicitly for a reproducible cutoff.
