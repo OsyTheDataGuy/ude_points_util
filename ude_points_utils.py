@@ -2384,16 +2384,21 @@ def classify_fighter_archetype(df, fighter_name, as_of=None):
     ARCHETYPE_STYLE_CONTROL_SUB_PCT30=-0.917, _GROUND_AND_POUND_PCT70=1.233.
     A fighter just past a cut-point gets the label on a hair: Robbie Lawler
     (fighter_url=f2925e6db404bf1d) reads orientation 0.363, so he's a
-    "ground-and-pound-leaning grappler" by 0.002 -- read the scores, not
+    "mostly a grappler, ground-and-pound-leaning" by 0.002 -- read the scores, not
     only the label, near an edge.
 
     Labels, applied hierarchically (style only distinguishes fighters who
-    are grappling in the first place): orientation<=-0.335 -> "primarily a
+    are grappling in the first place): orientation<=-0.335 -> "mostly a
     striker" (style not considered); orientation>=0.361 -> grappler, then
-    by style: <=-0.917 "control/submission-leaning grappler", >=1.233
-    "ground-and-pound-leaning grappler", between "balanced on the ground";
-    otherwise "well-rounded". None when grappling_orientation is NaN (no
+    by style: <=-0.917 "mostly a grappler, submission-leaning", >=1.233
+    "mostly a grappler, ground-and-pound-leaning", between "mostly a
+    grappler, mixes submissions and ground strikes"; otherwise "mixes
+    striking and grappling". None when grappling_orientation is NaN (no
     scoreable style data at all).
+
+    The labels describe STYLE (how a fighter spends their time), not
+    skill: "mixes striking and grappling" says nothing about being good at
+    either. For strengths/weaknesses see assess_defensive_vulnerability.
     """
     # Resolve the name on the FULL df: before as_of the fighter may have
     # fought under a different name (see resolve_fighter_url).
@@ -2443,16 +2448,16 @@ def _archetype_label(orientation, style):
     if pd.isna(orientation):
         return None
     if orientation <= ARCHETYPE_ORIENTATION_STRIKER_PCT30:
-        return 'primarily a striker'
+        return 'mostly a striker'
     if orientation >= ARCHETYPE_ORIENTATION_GRAPPLER_PCT70:
         if pd.isna(style):
-            return 'grappling-oriented (ground style undetermined)'
+            return 'mostly a grappler, ground style unknown'
         if style <= ARCHETYPE_STYLE_CONTROL_SUB_PCT30:
-            return 'control/submission-leaning grappler'
+            return 'mostly a grappler, submission-leaning'
         if style >= ARCHETYPE_STYLE_GROUND_AND_POUND_PCT70:
-            return 'ground-and-pound-leaning grappler'
-        return 'balanced on the ground'
-    return 'well-rounded'
+            return 'mostly a grappler, ground-and-pound-leaning'
+        return 'mostly a grappler, mixes submissions and ground strikes'
+    return 'mixes striking and grappling'
 
 
 # {column: (raw_attempted_column_stem, 'own'|'opp', prior_strength_k, divisor)}

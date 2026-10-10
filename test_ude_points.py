@@ -226,11 +226,11 @@ def test_similarity_pinned_matchup(df):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize('fighter, fighter_id, orientation, style, label', [
-    ('Khabib Nurmagomedov', '032cc3922d871c7f', 1.933, 4.746, 'ground-and-pound-leaning grappler'),
-    ('Islam Makhachev', '275aca31f61ba28c', 1.233, -1.872, 'control/submission-leaning grappler'),
-    ('Jailton Almeida', '41e83a89929d1327', 2.874, 0.003, 'balanced on the ground'),
-    ('Israel Adesanya', '1338e2c7480bdf9e', -1.178, -0.127, 'primarily a striker'),
-    ('Michael Page', 'a67d071163962af8', -1.063, -0.968, 'primarily a striker'),
+    ('Khabib Nurmagomedov', '032cc3922d871c7f', 1.933, 4.746, 'mostly a grappler, ground-and-pound-leaning'),
+    ('Islam Makhachev', '275aca31f61ba28c', 1.233, -1.872, 'mostly a grappler, submission-leaning'),
+    ('Jailton Almeida', '41e83a89929d1327', 2.874, 0.003, 'mostly a grappler, mixes submissions and ground strikes'),
+    ('Israel Adesanya', '1338e2c7480bdf9e', -1.178, -0.127, 'mostly a striker'),
+    ('Michael Page', 'a67d071163962af8', -1.063, -0.968, 'mostly a striker'),
 ])
 def test_archetype_pinned(df, fighter, fighter_id, orientation, style, label):
     result = u.classify_fighter_archetype(df, fighter, as_of=AS_OF).iloc[0]
