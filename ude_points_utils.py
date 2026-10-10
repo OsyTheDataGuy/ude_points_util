@@ -12,6 +12,70 @@ from plotly.subplots import make_subplots
 
 from ude_points_algorithm import is_no_score_fight
 
+'''0. Fighter identity'''
+
+# A fighter is identified by fighter_url, never by name. UFCStats names are
+# not stable ids: some fighters change name mid-career (Waldo Cortes-Acosta
+# -> Waldo Cortes Acosta, fighter_url=fc08099550072fe4), and two different
+# fighters can share one name (Bruno Silva: 12ebd7d157e91701 and
+# 294aa73dbf37d281). Matching on name splits the first kind of career in
+# two and merges the second kind into one.
+
+_URL_COLS = ['fighter_url_fighter_1', 'fighter_url_fighter_2']
+
+
+def resolve_fighter_url(df, fighter):
+    """
+    The fighter_url for `fighter`, given as a name (any name they have
+    fought under), a full fighter_url, or its 16-character id.
+
+    Returns None when df has no fights for them (e.g. df is filtered to
+    before their debut). Raises ValueError when a name belongs to more than
+    one fighter -- pass the fighter_url or its id instead.
+    """
+    fighter = str(fighter)
+    for url in pd.unique(df[_URL_COLS].values.ravel()):
+        if fighter == url or fighter == str(url).rstrip('/').split('/')[-1]:
+            return url
+
+    urls = set(df.loc[df['fighter_1'] == fighter, 'fighter_url_fighter_1']) | \
+           set(df.loc[df['fighter_2'] == fighter, 'fighter_url_fighter_2'])
+    if not urls:
+        return None
+    if len(urls) > 1:
+        raise ValueError(f"'{fighter}' is the name of {len(urls)} different fighters: {sorted(urls)}. "
+                         "Pass the fighter_url (or its 16-character id) instead.")
+    return urls.pop()
+
+
+def with_one_name_per_fighter(df):
+    """
+    Copy of df where fighter_1/fighter_2 hold exactly one name per
+    fighter_url, so any code that groups by name groups by fighter.
+
+    The name used is the one from the fighter's most recent fight in df.
+    If two different fighters end up with the same name, the fighter_url
+    id is appended to keep them apart: 'Bruno Silva (294aa73dbf37d281)'.
+    """
+    both_sides = pd.concat([
+        df[['event_date', 'fight_url', f'fighter_{s}', f'fighter_url_fighter_{s}']]
+        .set_axis(['event_date', 'fight_url', 'name', 'url'], axis=1)
+        for s in (1, 2)
+    ])
+    latest = (both_sides.sort_values(['event_date', 'fight_url'], kind='stable')
+              .drop_duplicates('url', keep='last').set_index('url')['name'])
+
+    # Disambiguate a name that two or more fighters share.
+    shared = latest[latest.duplicated(keep=False)].index
+    for url in shared:
+        latest[url] = f"{latest[url]} ({str(url).rstrip('/').split('/')[-1]})"
+
+    out = df.copy()
+    for s in (1, 2):
+        out[f'fighter_{s}'] = out[f'fighter_url_fighter_{s}'].map(latest)
+    return out
+
+
 '''1. Functions to Create Fighter Career Dataset'''
 def create_fighter_career_dataset(df, fighter_name):
     """
@@ -19,7 +83,9 @@ def create_fighter_career_dataset(df, fighter_name):
 
     Args:
     - df (pd.DataFrame): The full dataset of all fights.
-    - fighter_name (str): Name of the fighter to generate the career dataset for.
+    - fighter_name (str): The fighter -- a name, fighter_url or its id
+      (see resolve_fighter_url). Matched by fighter_url, so a career filed
+      under two names comes back whole.
 
     Returns:
     - pd.DataFrame: A new dataset containing the career details of the fighter.
@@ -31,7 +97,8 @@ def create_fighter_career_dataset(df, fighter_name):
       naturally, because it didn't fail naturally -- see that guard's
       comment for what actually happened before this existed.
     """
-    fighter_fights = filter_fighter_fights(df, fighter_name)
+    fighter_url = resolve_fighter_url(df, fighter_name)
+    fighter_fights = filter_fighter_fights(df, fighter_url) if fighter_url else df.iloc[0:0]
     if fighter_fights.empty:
         # extract_fighter_details_programmatically builds its output via
         # df.apply(..., result_type='expand') -- which never runs the
@@ -52,8 +119,8 @@ def create_fighter_career_dataset(df, fighter_name):
         # before any of that broken machinery runs, is what lets that
         # existing check actually fire as designed.
         return fighter_fights
-    fighter_details = extract_fighter_details_programmatically(fighter_fights, fighter_name)
-    opponent_details = extract_opponent_details_programmatically(fighter_fights, fighter_name)
+    fighter_details = extract_fighter_details_programmatically(fighter_fights, fighter_url)
+    opponent_details = extract_opponent_details_programmatically(fighter_fights, fighter_url)
     final_dataset = reorganize_fight_data_programmatically(fighter_fights, fighter_details, opponent_details)
     final_dataset = create_diff_columns(final_dataset)
 
@@ -65,26 +132,29 @@ def filter_fighter_fights(df, fighter_name):
 
     Args:
     - df (pd.DataFrame): The full dataset of all fights.
-    - fighter_name (str): Name of the fighter.
+    - fighter_name (str): The fighter -- a name, fighter_url or its id
+      (see resolve_fighter_url).
 
     Returns:
-    - pd.DataFrame: Filtered dataset with only the fights involving the fighter.
+    - pd.DataFrame: Filtered dataset with only the fights involving the
+      fighter, matched by fighter_url. Empty if they have no fights in df.
     """
-    return df[(df['fighter_1'] == fighter_name) | (df['fighter_2'] == fighter_name)].copy()
+    fighter_url = resolve_fighter_url(df, fighter_name)
+    return df[(df['fighter_url_fighter_1'] == fighter_url) | (df['fighter_url_fighter_2'] == fighter_url)].copy()
 
-def extract_fighter_details_programmatically(df, fighter_name):
+def extract_fighter_details_programmatically(df, fighter_url):
     """
     Extracts dynamic details of the specified fighter from each fight.
 
     Args:
     - df (pd.DataFrame): Filtered dataset of the fighter's fights.
-    - fighter_name (str): Name of the fighter.
+    - fighter_url (str): The fighter's fighter_url.
 
     Returns:
     - pd.DataFrame: DataFrame containing fighter details for each fight.
     """
     # Create a mask to identify if the fighter is in fighter_1 or fighter_2 columns
-    is_fighter_1 = df['fighter_1'] == fighter_name
+    is_fighter_1 = df['fighter_url_fighter_1'] == fighter_url
 
     # Identify all columns that contain '_fighter_1' or '_fighter_2', except 'fighter_1' and 'fighter_2'
     fighter_columns = [col for col in df.columns if ('fighter_1' in col or 'fighter_2' in col) and col not in ['fighter_1', 'fighter_2']]
@@ -107,19 +177,19 @@ def extract_fighter_details_programmatically(df, fighter_name):
     return fighter_stats
 
 
-def extract_opponent_details_programmatically(df, fighter_name):
+def extract_opponent_details_programmatically(df, fighter_url):
     """
     Extracts dynamic details of the opponent from each fight.
 
     Args:
     - df (pd.DataFrame): Filtered dataset of the fighter's fights.
-    - fighter_name (str): Name of the fighter.
+    - fighter_url (str): The fighter's fighter_url.
 
     Returns:
     - pd.DataFrame: DataFrame containing opponent details for each fight.
     """
     # Create a mask to identify if the fighter is in fighter_1 or fighter_2 columns
-    is_fighter_1 = df['fighter_1'] == fighter_name
+    is_fighter_1 = df['fighter_url_fighter_1'] == fighter_url
 
     # Identify all columns that contain '_fighter_1' or '_fighter_2', except 'fighter_1' and 'fighter_2'
     fighter_columns = [col for col in df.columns if ('fighter_1' in col or 'fighter_2' in col) and col not in ['fighter_1', 'fighter_2']]
@@ -695,6 +765,7 @@ def rank_fighters_by_latest_ude_points(df):
 
 '''5. Functions to ranking by Ude points (rank by career peak Ude rating)'''
 def rank_fighters_by_peak_ude_points(df):
+    df = with_one_name_per_fighter(df)  # group by fighter, not by name string
     # Melt the dataframe to combine fighter_1 and fighter_2 stats into a single 'fighter' column
     fighter_1_data = df[['fighter_1', 'fighter_url_fighter_1','ude_points_post_fight_fighter_1',
                           'fight_day_age (yrs)_fighter_1',
@@ -1082,6 +1153,7 @@ def calculate_striking_potency(df, prior_strength=RATE_SHRINKAGE_PRIOR_STRENGTH)
     same-units rate toward a population baseline replaces both the ratio
     construction and the normalization step at once.
     """
+    df = with_one_name_per_fighter(df)  # group by fighter, not by name string
     wins_1 = df['fight_result_fighter_1'] == 'W'
     wins_2 = df['fight_result_fighter_2'] == 'W'
     # 'details' is the raw scrape's finish-method text, after
@@ -1154,6 +1226,7 @@ def calculate_grappling_potency(df, prior_strength=RATE_SHRINKAGE_PRIOR_STRENGTH
     see its docstring for why this replaces the original
     submission_wins / (td_landed + sub_att) formulation.
     """
+    df = with_one_name_per_fighter(df)  # group by fighter, not by name string
     wins_1 = df['fight_result_fighter_1'] == 'W'
     wins_2 = df['fight_result_fighter_2'] == 'W'
     not_injury = ~df['details'].astype(str).str.contains('injury', case=False, na=False)
@@ -1308,6 +1381,7 @@ def calculate_striking_power(df, prior_strength=POWER_SHRINKAGE_PRIOR_STRENGTH):
     applies, for the same reason). Draws are kept, since a draw still
     reflects real landed strikes and real knockdowns.
     """
+    df = with_one_name_per_fighter(df)  # group by fighter, not by name string
     # Reuse ude_points_algorithm.is_no_score_fight (result in {'NC'} OR
     # method in {'DQ','Overturned'}) rather than a bare result == 'NC'
     # check -- the same reason filter_invalid_rematches reuses it. A
@@ -1511,6 +1585,7 @@ def process_rematch_data(df, exclude_no_contests=False):
     meetings, whether each was an immediate rematch (no intervening fight
     for either fighter), and who won.
     """
+    df = with_one_name_per_fighter(df)  # group by fighter, not by name string
     fighter_pairs = find_rematch_pairs(df)
     rematch_fights = get_all_fights_between_pairs(df, fighter_pairs).copy()
     rematch_fights['immediate'] = rematch_fights.apply(lambda x: is_immediate_rematch(x, df), axis=1)
@@ -1745,6 +1820,7 @@ def calculate_durability_adjusted_power(df, prior_strength_kd=POWER_SHRINKAGE_PR
     Same "building block, apply a volume floor before ranking" caveat as
     calculate_striking_power -- use get_durability_adjusted_power_by_weight_class.
     """
+    df = with_one_name_per_fighter(df)  # group by fighter, not by name string
     d = add_opponent_durability_multiplier(df, prior_strength=prior_strength_durability)
     not_no_score = ~d.apply(
         lambda r: is_no_score_fight(r['fight_result_fighter_1'], r['method'])
@@ -1836,10 +1912,18 @@ PHYSICAL_SIMILARITY_COLUMNS = ['age', 'Height (m)', 'Reach (in)']
 #   distinction; putting ground-strike quality in the same axis as
 #   control-time and sub-attempt-rate is what lets it.
 # - clinch_strikes_accuracy/defence and distance_strikes_accuracy/defence
-#   sit in striking_placement alongside head/body/leg -- both are "where
+#   sit in striking_placement alongside body/leg -- both are "where
 #   and how well do they land while free to strike" (clinch entries mostly
 #   feed exchanges, not extended control, unlike ground), grouped with
 #   target-mix rather than with the grappling axis.
+# - head_strikes_accuracy/defence are left out. Most head strikes are thrown
+#   at distance, so head and distance accuracy/defence largely measure the
+#   same thing (r=0.68 / 0.73 across fighters with 10+ fights); keeping both
+#   double-counts it. Head goes rather than distance because the axes are
+#   organised by POSITION (distance/clinch/ground usage in phase_preference,
+#   ground accuracy in grappling), so accuracy and usage then describe the
+#   same positions. assess_defensive_vulnerability drops head for the same
+#   reason.
 # - Position USAGE (share/rate of ground vs. clinch vs. distance) is a
 #   separate axis (phase_preference) from position ACCURACY -- "how much
 #   they live there" and "how good they are there" are different questions
@@ -1853,7 +1937,6 @@ STYLE_SIMILARITY_AXES = {
         'dynamic_sig_strikes_attempt_rate', 'dynamic_td_attempt_rate',
     ],
     'striking_placement': [
-        'dynamic_head_strikes_accuracy', 'dynamic_head_strikes_defence',
         'dynamic_body_strikes_accuracy', 'dynamic_body_strikes_defence',
         'dynamic_leg_strikes_accuracy', 'dynamic_leg_strikes_defence',
         'dynamic_clinch_strikes_accuracy', 'dynamic_clinch_strikes_defence',
@@ -1873,10 +1956,11 @@ STYLE_SIMILARITY_AXES = {
         # above already cover the latter) -- "how busy once he actually has
         # someone controlled" is a different question from "how much
         # output relative to the whole fight," and the two can disagree:
-        # Khabib and Almeida have similar total-fight-time ground rates
-        # (3.08 vs. 2.79) despite Almeida's much higher ground SHARE (0.80
-        # vs. 0.38), but Khabib's ground-strikes-per-control-minute (5.54)
-        # is ~60% higher than Almeida's (3.51) -- a real busier-once-on-top
+        # Khabib (fighter_url=032cc3922d871c7f) and Almeida
+        # (fighter_url=41e83a89929d1327) have close total-fight-time ground
+        # rates (2.96 vs. 2.34) despite Almeida's much higher ground SHARE
+        # (0.64 vs. 0.36), but Khabib's ground-strikes-per-control-minute
+        # (4.94) is ~47% higher than Almeida's (3.35) -- a real busier-once-on-top
         # vs. holds-longer-and-works-patiently distinction neither share
         # nor the total-time rate surfaces on its own. See
         # add_dynamic_control_minute_rate's docstring for the caveat: the
@@ -1887,11 +1971,61 @@ STYLE_SIMILARITY_AXES = {
 }
 STYLE_SIMILARITY_COLUMNS = [col for cols in STYLE_SIMILARITY_AXES.values() for col in cols]
 
+# The pipeline functions that build every STYLE_SIMILARITY_COLUMNS value.
+# Each one walks a df in chronological order and, for every row, writes the
+# fighter's state ENTERING that fight before adding the fight's own stats.
+_STYLE_STATE_BUILDERS = [
+    'add_dynamic_strike_accuracy', 'add_dynamic_strike_defence',
+    'add_dynamic_strike_position_share', 'add_dynamic_kd_rate',
+    'add_dynamic_control_minute_rate', 'add_dynamic_td_accuracy',
+    'add_dynamic_td_defence', 'add_dynamic_attempt_rate',
+]
+
+
+def _style_state_after_last_fight(df, fighter_url):
+    """
+    {column: value} for every STYLE_SIMILARITY_COLUMNS column: the fighter's
+    cumulative state AFTER their last fight in df -- what the pipeline would
+    write on their next fight's row.
+
+    How: take only this fighter's rows, add one placeholder fight dated after
+    the last one, and run the pipeline's own dynamic_* builders over it. The
+    placeholder's values are the answer. The builders' per-fighter state
+    depends only on that fighter's own rows and fixed constants, so running
+    them on this small slice gives the same numbers as the full pipeline run.
+    Reuses the pipeline code instead of re-implementing it.
+    """
+    import ude_points_feature_engineering_pipeline as pipeline
+
+    own = df[(df['fighter_url_fighter_1'] == fighter_url) | (df['fighter_url_fighter_2'] == fighter_url)]
+    # Same order the pipeline uses (see its run function).
+    own = own.sort_values(['event_date', 'fight_url'], kind='stable')
+    own = own.drop(columns=[c for c in own.columns if c.startswith('dynamic_')])
+
+    # The placeholder's own fight stats are never used: each builder reads
+    # the state before adding a row's stats, and nothing comes after it.
+    placeholder = own.iloc[[-1]].copy()
+    placeholder['fighter_url_fighter_1'] = fighter_url
+    placeholder['fighter_url_fighter_2'] = '__placeholder_opponent__'
+    placeholder['event_date'] = pd.to_datetime(placeholder['event_date']) + pd.Timedelta(days=1)
+    placeholder['fight_url'] = '__placeholder_fight__'
+    rebuilt = pd.concat([own, placeholder], ignore_index=True)
+
+    for builder in _STYLE_STATE_BUILDERS:
+        rebuilt = getattr(pipeline, builder)(rebuilt)
+
+    last = rebuilt.iloc[-1]
+    return {col: last[f'{col}_fighter_1'] for col in STYLE_SIMILARITY_COLUMNS}
+
+
 def generate_fighter_profile(df, fighter_name, as_of=None):
     """
-    One-row physical + style profile for a fighter: their current age,
-    height, reach, stance, and the cumulative dynamic_* skill snapshot
-    from their most recent fight.
+    One-row physical + style profile for a fighter: their age, height,
+    reach, stance, and their cumulative dynamic_* style state AFTER their
+    most recent fight in df -- i.e. what they carry into their next fight.
+    fighter_name may be any name the fighter has used, or their
+    fighter_url / its id (see resolve_fighter_url); 'fighter' in the output
+    is the name from their most recent fight.
 
     as_of: if set, the profile is built only from fights strictly before
     this date -- required for any retrospective/backtest call, where the
@@ -1919,12 +2053,15 @@ def generate_fighter_profile(df, fighter_name, as_of=None):
     calculate_similarity_differences surfaces it as a separate
     match/mismatch flag rather than blending it into total_difference.
 
-    The dynamic_* values reflect the fighter's cumulative state walking
-    INTO their most recent fight, not including how that fight itself
-    went -- dynamic_* columns are pre-fight snapshots by convention
-    throughout this project (see mma_content_strategy.md's data-sourcing
-    rules). df without a Stance column (e.g. plain v2_6.csv) still works;
-    the profile's 'Stance' value is just None in that case.
+    The dynamic_* values INCLUDE the most recent fight. The stored
+    dynamic_* columns on a fight row are pre-fight snapshots (the state
+    entering that fight), so reading them off the latest row would drop
+    that fight's results. The profile instead rebuilds the state after it
+    (_style_state_after_last_fight). With as_of set, this equals the stored
+    dynamic_* values on the fighter's first row on or after as_of. Age is
+    still the age on the day of the most recent fight, not today's age.
+    df without a Stance column (e.g. plain v2_6.csv) still works; the
+    profile's 'Stance' value is just None in that case.
 
     Two extra diagnostic fields, *_max_fight_share, flag when a
     per-control-minute rate's cumulative numerator is dominated by a
@@ -1932,41 +2069,39 @@ def generate_fighter_profile(df, fighter_name, as_of=None):
     (add_dynamic_control_minute_rate) already protects against a THIN
     total exposure, but not against exposure that's real in aggregate yet
     concentrated in one outlier bout. Found for real: Petr Yan's
-    dynamic_ground_strikes_per_control_minute is a plausible-looking 4.752
-    entering his 2025-12-06 fight vs. Merab Dvalishvili, but 97 of the 235
-    ground strikes behind it (41%) came from a single fight, his 2020-07-11
-    TKO of Jose Aldo -- a share this field surfaces as
-    ground_strikes_per_control_minute_max_fight_share=0.413, so a
-    downstream consumer can judge whether the number reflects a sustained
-    pattern or one outlier performance, rather than trusting the rate
-    blind. NaN when there's no fight history yet (a fighter's own debut),
-    matching every other dynamic_* column's zero-denominator convention.
+    (fighter_url=d661ce4da776fc20) profile as_of='2025-12-06' -- entering
+    his fight vs. Merab Dvalishvili (fight_url=4a0db214d9721d6e) -- has
+    dynamic_ground_strikes_per_control_minute=4.752, a plausible-looking
+    rate, but 97 of the 235 ground strikes behind it (41%) came from one
+    fight, his 2020-07-11 TKO of Jose Aldo (fight_url=0f9be7ac405772f8):
+    ground_strikes_per_control_minute_max_fight_share=0.413. A downstream
+    consumer can then judge whether the rate reflects a sustained pattern
+    or one outlier performance.
 
-    Also NaN below MAX_FIGHT_SHARE_MIN_EVENTS=5 total career events of that
+    NaN below MAX_FIGHT_SHARE_MIN_EVENTS=5 total career events of that
     type -- below that, the share isn't measuring concentration at all,
     it's arithmetic (a total of 1 forces share=1.0; a total of 2 forces
-    share>=0.5). Checked against the real distribution across 2,565
-    fighters: sub_att is the case this matters for -- median career total
-    entering a fighter's latest fight is only 1, and 83% of fighters
-    (2,131/2,565) have a total below 5, so
-    sub_attempts_per_control_minute_max_fight_share is NaN for most of the
-    roster by design, not by bug -- sub attempts are rare enough that
-    "which fight dominated my sub attempts" is genuinely unanswerable for
-    most fighters. ground_strikes_attempted doesn't have this problem
-    (median 16; only 36% fall below 5).
+    share>=0.5). Across the 2,570 fighters' career totals, sub_att is the
+    case this matters for: median total 1, and 81.7% (2,099) have fewer
+    than 5, so sub_attempts_per_control_minute_max_fight_share is NaN for
+    most of the roster by design -- sub attempts are too rare to say which
+    fight dominated them. ground_strikes_attempted doesn't have this
+    problem (median 21; 28.1% fall below 5).
     """
+    # Resolve the name on the FULL df: before as_of the fighter may have
+    # fought under a different name (see resolve_fighter_url).
+    fighter = resolve_fighter_url(df, fighter_name) or fighter_name
     if as_of is not None:
         df = df[pd.to_datetime(df['event_date']) < pd.to_datetime(as_of)]
 
-    career = create_fighter_career_dataset(df, fighter_name)
+    career = create_fighter_career_dataset(df, fighter)
     if career.empty:
         raise ValueError(f"No fights found for fighter '{fighter_name}'"
                          + (f" before {pd.to_datetime(as_of).date()}" if as_of is not None else ""))
 
     career = career.sort_values(by='event_date', ascending=False)
     latest = career.iloc[0]
-    history = career.iloc[1:]
-    profile = {'fighter': fighter_name, 'fighter_url': latest['fighter_url'],
+    profile = {'fighter': latest['fighter'], 'fighter_url': latest['fighter_url'],
                'Stance': latest.get('Stance'),
                # The division this fight is/was actually in -- used by
                # calculate_similarity_differences to scale comparisons
@@ -1975,23 +2110,22 @@ def generate_fighter_profile(df, fighter_name, as_of=None):
                # docstring). Not part of PHYSICAL/STYLE_SIMILARITY_COLUMNS:
                # it's the scaling CONTEXT, not a compared dimension itself.
                'weight_class_cleaned': latest.get('weight_class_cleaned'),
-               # Keys this fighter's own exposure lookup in
-               # calculate_similarity_differences' evidence_weighting --
-               # exposure is a snapshot-in-time quantity (cumulative
-               # attempts entering a specific fight), so it needs the date
-               # of the fight this profile's dynamic_* values snapshot,
-               # not just the fighter's identity.
+               # The date of the last fight included in this profile. Keys
+               # this fighter's exposure lookup in
+               # calculate_similarity_differences' evidence_weighting, which
+               # reads the cumulative exposure THROUGH this date.
                'profile_event_date': latest.get('event_date')}
-    for col in PHYSICAL_SIMILARITY_COLUMNS + STYLE_SIMILARITY_COLUMNS:
+    for col in PHYSICAL_SIMILARITY_COLUMNS:
         profile[col] = latest.get(col)
+    profile.update(_style_state_after_last_fight(df, latest['fighter_url']))
 
     MAX_FIGHT_SHARE_MIN_EVENTS = 5
     for numerator_col, out_col in [
         ('ground_strikes_attempted', 'ground_strikes_per_control_minute_max_fight_share'),
         ('sub_att', 'sub_attempts_per_control_minute_max_fight_share'),
     ]:
-        total = history[numerator_col].sum()
-        profile[out_col] = (round(history[numerator_col].max() / total, 3)
+        total = career[numerator_col].sum()
+        profile[out_col] = (round(career[numerator_col].max() / total, 3)
                              if total >= MAX_FIGHT_SHARE_MIN_EVENTS else np.nan)
 
     return pd.DataFrame([profile])
@@ -2213,29 +2347,29 @@ def classify_fighter_archetype(df, fighter_name, as_of=None):
     kd_rate 0.001-0.005, attempt_rate 10-14 -- a clean, sizeable
     separation on both inputs in the expected direction.
 
-    Verified against the pre-registered roster: Khabib Nurmagomedov
-    (fighter_url=032cc3922d871c7f, LW) grappling_orientation=1.65,
-    ground_game_style=4.96 -- high orientation, strongly positive style,
+    Verified against the pre-registered roster (orientation / style, on
+    the current dataset): Khabib Nurmagomedov (fighter_url=032cc3922d871c7f,
+    LW) 1.93 / 4.75 -- high orientation, strongly positive style,
     ground-and-pound. Islam Makhachev (fighter_url=275aca31f61ba28c, WW)
-    0.84 / -1.83 -- moderate orientation, strongly negative style,
-    control-sub. Jailton Almeida (fighter_url=41e83a89929d1327, HW) 2.88 /
-    0.01 -- highest orientation of the seven, but style dead-center:
-    balanced/hybrid on the ground rather than leaning either way, not an
-    unresolved case. Israel Adesanya (fighter_url=1338e2c7480bdf9e, MW)
-    -1.14 / -0.13 and Michael Page (fighter_url=a67d071163962af8, MW)
-    -1.24 / -0.27 -- strongly negative orientation, pure strikers. Jon
-    Jones (fighter_url=07f72a2a7591b409, HW) 0.41 / 1.52 and Petr Yan
-    (fighter_url=d661ce4da776fc20, BW) 0.25 / 4.73 -- low-moderate
-    orientation, "well-rounded, mostly feet" region; Yan's high style
-    score should be read alongside his
-    ground_strikes_per_control_minute_max_fight_share=0.413 -- 41% of his
-    career ground-strike volume entering that snapshot came from a single
-    fight (his 2020-07-11 TKO of Jose Aldo), so it reflects one dominant
+    1.23 / -1.87 -- grappler, strongly negative style, control-sub. Jailton
+    Almeida (fighter_url=41e83a89929d1327, HW) 2.87 / 0.00 -- highest
+    orientation of the seven, but style dead-center: balanced on the
+    ground, not an unresolved case. Israel Adesanya
+    (fighter_url=1338e2c7480bdf9e, MW) -1.18 / -0.13 and Michael Page
+    (fighter_url=a67d071163962af8, MW) -1.06 / -0.97 -- strongly negative
+    orientation, pure strikers. Jon Jones (fighter_url=07f72a2a7591b409, HW)
+    0.71 / 2.14 and Petr Yan (fighter_url=d661ce4da776fc20, BW) 0.60 / 4.45
+    -- moderate orientation, ground-and-pound when it hits the mat. Read
+    Yan's style score alongside his
+    ground_strikes_per_control_minute_max_fight_share=0.409: 41% of his
+    career ground-strike volume came from one fight (his 2020-07-11 TKO of
+    Jose Aldo, fight_url=0f9be7ac405772f8), so it reflects one dominant
     performance more than a sustained pattern.
 
     archetype_label buckets the two scores using terciles (30th/70th
     percentile) of this SAME function's output, run once across every
-    fighter with >=8 career fights (793 fighters) -- restricted to that
+    fighter with >=8 career fights (800 fighters, data through 2026-10-03)
+    -- restricted to that
     subpopulation because ground_game_style's spread grows sharply with
     career length (share with |ground_game_style|>3 goes from 2.5% at 3-4
     fights to 24.3% at 13+), which is shrinkage correctly letting fighters
@@ -2246,22 +2380,29 @@ def classify_fighter_archetype(df, fighter_name, as_of=None):
     distributions are unimodal with no natural gap between clusters (MMA
     styles form a spectrum here, not discrete groups) -- these percentile
     cut-points are a disclosed convention, not a discovered boundary:
-    ARCHETYPE_ORIENTATION_STRIKER_PCT30=-0.297, _GRAPPLER_PCT70=0.395,
-    ARCHETYPE_STYLE_CONTROL_SUB_PCT30=-0.912, _GROUND_AND_POUND_PCT70=1.273.
+    ARCHETYPE_ORIENTATION_STRIKER_PCT30=-0.335, _GRAPPLER_PCT70=0.361,
+    ARCHETYPE_STYLE_CONTROL_SUB_PCT30=-0.917, _GROUND_AND_POUND_PCT70=1.233.
+    A fighter just past a cut-point gets the label on a hair: Robbie Lawler
+    (fighter_url=f2925e6db404bf1d) reads orientation 0.363, so he's a
+    "ground-and-pound-leaning grappler" by 0.002 -- read the scores, not
+    only the label, near an edge.
 
     Labels, applied hierarchically (style only distinguishes fighters who
-    are grappling in the first place): orientation<=-0.243 -> "primarily a
-    striker" (style not considered); orientation>=0.372 -> grappler, then
-    by style: <=-0.912 "control/submission-leaning grappler", >=1.273
+    are grappling in the first place): orientation<=-0.335 -> "primarily a
+    striker" (style not considered); orientation>=0.361 -> grappler, then
+    by style: <=-0.917 "control/submission-leaning grappler", >=1.233
     "ground-and-pound-leaning grappler", between "balanced on the ground";
     otherwise "well-rounded". None when grappling_orientation is NaN (no
     scoreable style data at all).
     """
+    # Resolve the name on the FULL df: before as_of the fighter may have
+    # fought under a different name (see resolve_fighter_url).
+    fighter = resolve_fighter_url(df, fighter_name) or fighter_name
     df_scoped = df
     if as_of is not None:
         df_scoped = df[pd.to_datetime(df['event_date']) < pd.to_datetime(as_of)]
 
-    profile = generate_fighter_profile(df_scoped, fighter_name)
+    profile = generate_fighter_profile(df_scoped, fighter)
     weight_class = profile['weight_class_cleaned'].values[0]
     ref = _compute_robust_center_scale_reference(df_scoped, ARCHETYPE_Z_COLUMNS, weight_class)
 
@@ -2289,10 +2430,10 @@ def classify_fighter_archetype(df, fighter_name, as_of=None):
                      'sub_attempts_per_control_minute_max_fight_share']]
 
 
-ARCHETYPE_ORIENTATION_STRIKER_PCT30 = -0.297
-ARCHETYPE_ORIENTATION_GRAPPLER_PCT70 = 0.395
-ARCHETYPE_STYLE_CONTROL_SUB_PCT30 = -0.912
-ARCHETYPE_STYLE_GROUND_AND_POUND_PCT70 = 1.273
+ARCHETYPE_ORIENTATION_STRIKER_PCT30 = -0.335
+ARCHETYPE_ORIENTATION_GRAPPLER_PCT70 = 0.361
+ARCHETYPE_STYLE_CONTROL_SUB_PCT30 = -0.917
+ARCHETYPE_STYLE_GROUND_AND_POUND_PCT70 = 1.233
 
 
 def _archetype_label(orientation, style):
@@ -2315,18 +2456,18 @@ def _archetype_label(orientation, style):
 
 
 # {column: (raw_attempted_column_stem, 'own'|'opp', prior_strength_k, divisor)}
-# -- the 16 STYLE_SIMILARITY_COLUMNS whose reliability depends on how much
+# -- the 14 STYLE_SIMILARITY_COLUMNS whose reliability depends on how much
 # real exposure (attempts, attempts faced, or control-minutes) backs the
 # cumulative value entering a given fight. 'own' reads the stem off THIS
 # fighter's side (accuracy, and the two _per_control_minute columns, whose
 # exposure is cumulative control-minutes); 'opp' reads it off the
 # OPPONENT's side (defence -- exposure is attempts FACED, not thrown). k is
-# the beta-binomial-MLE-fit prior strength for the 14 accuracy/defence
+# the beta-binomial-MLE-fit prior strength for the 12 accuracy/defence
 # columns and 30.0 (the control-minute shrinkage constant) for the two
 # _per_control_minute columns, whose exposure isn't binomial. It is used as a
 # WEIGHTING constant, not a reliability: strikes cluster within fights, so a
 # rate's real reliability at a given exposure is lower than n/(n+k)
-# implies, even though k calibrates predictions well. The 12 head/body/leg/
+# implies, even though k calibrates predictions well. The 10 body/leg/
 # clinch/distance/ground accuracy+defence columns stay unshrunk at the
 # source and are evidence-weighted here instead (see
 # canonical_project_state.md, opponent-similarity section, for why
@@ -2338,8 +2479,6 @@ def _archetype_label(orientation, style):
 # entry: they aren't in STYLE_SIMILARITY_COLUMNS (computed by the pipeline,
 # never consumed by opponent-similarity), so there is nothing to weight.
 SIMILARITY_EXPOSURE_SPEC = {
-    'dynamic_head_strikes_accuracy': ('head_strikes_attempted', 'own', 29.83, 1.0),
-    'dynamic_head_strikes_defence': ('head_strikes_attempted', 'opp', 29.35, 1.0),
     'dynamic_body_strikes_accuracy': ('body_strikes_attempted', 'own', 30.49, 1.0),
     'dynamic_body_strikes_defence': ('body_strikes_attempted', 'opp', 30.18, 1.0),
     'dynamic_leg_strikes_accuracy': ('leg_strikes_attempted', 'own', 28.19, 1.0),
@@ -2359,8 +2498,11 @@ SIMILARITY_EXPOSURE_SPEC = {
 
 def _compute_exposure_table(df, columns):
     """
-    {column: DataFrame(fighter_url, event_date, exposure)} -- cumulative
-    exposure ENTERING each fight (own attempts for accuracy, attempts FACED
+    {column: DataFrame(fighter_url, event_date, exposure, exposure_through)}
+    -- `exposure` is cumulative exposure ENTERING each fight (the state a
+    past opponent's stored dynamic_* value reflects); `exposure_through`
+    adds that fight itself (the state generate_fighter_profile reflects).
+    Exposure means own attempts for accuracy, attempts FACED
     for defence, cumulative control-minutes for the two
     _per_control_minute columns) for every column in `columns` that has a
     SIMILARITY_EXPOSURE_SPEC entry. This is the same quantity
@@ -2401,8 +2543,9 @@ def _compute_exposure_table(df, columns):
         long = pd.concat(frames, ignore_index=True).sort_values(['fighter_url', 'event_date', 'fight_url'], kind='stable')
         # cumsum includes the current row; subtracting it back out gives
         # the cumulative total ENTERING this fight, not including it.
-        long['exposure'] = long.groupby('fighter_url')['raw'].cumsum() - long['raw']
-        tables[col] = long[['fighter_url', 'event_date', 'exposure']].drop_duplicates(
+        long['exposure_through'] = long.groupby('fighter_url')['raw'].cumsum()
+        long['exposure'] = long['exposure_through'] - long['raw']
+        tables[col] = long[['fighter_url', 'event_date', 'exposure', 'exposure_through']].drop_duplicates(
             subset=['fighter_url', 'event_date'], keep='last').reset_index(drop=True)
     return tables
 
@@ -2435,7 +2578,7 @@ def _compute_expected_difference_reference(df, columns, weight_class=None,
     fallback population _compute_robust_scale_reference itself uses for
     that column, so a fully-unknown column contributes neither "similar"
     nor "different" -- just the population's own typical spread. NOT a
-    constant across columns (measured range 1.09-2.07 across the 16
+    constant across columns (promotion-wide range 1.09-1.53 across the 14
     SIMILARITY_EXPOSURE_SPEC columns) -- must be computed per column.
     """
     long = _build_population_long_table(df, columns)
@@ -2528,7 +2671,7 @@ def calculate_similarity_differences(df, future_profile, career_dataset, columns
     caught by accident -- Jack Della Maddalena's own career control-time
     never clears the 5-minute floor, so his profile is NaN on both
     _per_control_minute columns, capping every candidate's achievable
-    n_columns_compared at 25 of 27; with min_columns fixed at "27 - 1 = 26"
+    n_columns_compared at 23 of 25; with min_columns fixed at "25 - 1 = 24"
     regardless, no candidate could ever clear it, and
     find_most_similar_past_opponents(df, 'Islam Makhachev', 'Jack Della
     Maddalena') -- the flagship example used throughout this project's own
@@ -2593,13 +2736,13 @@ def calculate_similarity_differences(df, future_profile, career_dataset, columns
     to total_difference toward a population-typical "expected difference"
     (see _compute_expected_difference_reference) in proportion to how much
     real exposure backs BOTH the candidate's and the future opponent's
-    value on that column, for the 16 columns in SIMILARITY_EXPOSURE_SPEC.
+    value on that column, for the 14 columns in SIMILARITY_EXPOSURE_SPEC.
     Per column, per candidate: w = (e_candidate / (e_candidate + k)) *
     (e_future / (e_future + k)) -- algebraically the same weight
     _shrink_rate itself places on observed vs. prior data, since
     (count + k*p)/(total + k) = w*(count/total) + (1-w)*p with
     w = total/(total+k). adjusted_|diff| = w*|diff| + (1-w)*expected_diff.
-    Exists because the 12 head/body/leg/clinch/distance/ground accuracy and
+    Exists because the 10 body/leg/clinch/distance/ground accuracy and
     defence columns (plus the already-shrunk dynamic_td_accuracy/_defence
     and _per_control_minute columns, weighted the same way for consistency)
     stay UNSHRUNK at the source -- shrinking them directly biases the ranking
@@ -2614,6 +2757,8 @@ def calculate_similarity_differences(df, future_profile, career_dataset, columns
     moved it a further -0.44. With evidence weighting on the unshrunk
     columns the production bias (-0.233, 95% CI [-0.260, -0.207], 600 calls,
     vs. the pre-phase-1 raw ranking) becomes +0.009 (CI [-0.020, +0.038]).
+    These figures were measured on the 27-column set that still included
+    head accuracy/defence; they have not been re-measured on the current 25.
     Dropping a thin column outright would grade that candidate on an easier,
     smaller test, the failure min_columns already exists to prevent (see
     above) -- reasoned, not measured; a weighted mean (sum of w*|diff| over
@@ -2650,7 +2795,8 @@ def calculate_similarity_differences(df, future_profile, career_dataset, columns
             for column, exp_table in exposure_tables.items():
                 match = exp_table[(exp_table['fighter_url'] == future_url) &
                                    (exp_table['event_date'] == future_event_date)]
-                future_exposure[column] = match['exposure'].values[0] if len(match) else 0.0
+                # 'exposure_through': the profile includes its last fight.
+                future_exposure[column] = match['exposure_through'].values[0] if len(match) else 0.0
 
     result = career_dataset[['opponent', 'opponent_fighter_url']].copy()
     if 'event_date' in career_dataset.columns:
@@ -2779,7 +2925,7 @@ def calculate_style_similarity(df, future_profile, career_dataset, min_columns=N
     different power) are distinguishable in the output, not collapsed into
     one number. df, weight_class, evidence_weighting: see
     calculate_similarity_differences (evidence_weighting on by default here,
-    since 16 of these 27 columns have a SIMILARITY_EXPOSURE_SPEC entry).
+    since 14 of these 25 columns have a SIMILARITY_EXPOSURE_SPEC entry).
     """
     return calculate_similarity_differences(df, future_profile, career_dataset, STYLE_SIMILARITY_COLUMNS,
                                              min_columns, axis_map=STYLE_SIMILARITY_AXES, weight_class=weight_class,
@@ -2793,6 +2939,8 @@ def find_most_similar_past_opponents(df, fighter_name, future_opponent_name, exc
     which of fighter_name's PAST opponents most resemble future_opponent_name
     -- physically and stylistically, reported SEPARATELY (see module-level
     note on PHYSICAL_SIMILARITY_COLUMNS/STYLE_SIMILARITY_COLUMNS for why).
+    Either fighter may be given as any name they have used, or a
+    fighter_url / its id (see resolve_fighter_url).
 
     as_of: if set, only fights strictly before this date are used -- for
     both the future opponent's profile AND fighter_name's past-opponent
@@ -2825,11 +2973,15 @@ def find_most_similar_past_opponents(df, fighter_name, future_opponent_name, exc
     last). Raises ValueError if either fighter has no fights in df (before
     as_of) -- e.g. a UFC debut, or a misspelled name.
     """
+    # Resolve the name on the FULL df: before as_of the fighter may have
+    # fought under a different name (see resolve_fighter_url).
+    fighter = resolve_fighter_url(df, fighter_name) or fighter_name
+    future_opponent = resolve_fighter_url(df, future_opponent_name) or future_opponent_name
     if as_of is not None:
         df = df[pd.to_datetime(df['event_date']) < pd.to_datetime(as_of)]
 
-    future_profile = generate_fighter_profile(df, future_opponent_name)
-    career_dataset = create_fighter_career_dataset(df, fighter_name)
+    future_profile = generate_fighter_profile(df, future_opponent)
+    career_dataset = create_fighter_career_dataset(df, fighter)
     if career_dataset.empty:
         # create_fighter_career_dataset returns its unprocessed empty input
         # (see its own guard), which has no opponent_* columns -- without this
@@ -3099,9 +3251,8 @@ def assess_defensive_vulnerability(df, fighter_name, as_of=None):
     largest single fight's share of attempts faced (NaN below 5 total) --
     flags a score resting on one fight.
 
-    The state includes the fighter's LATEST fight (unlike
-    generate_fighter_profile, whose dynamic_* values are the state entering
-    it). as_of scopes the dataset first, so the result equals a call on the
+    The state includes the fighter's LATEST fight (as generate_fighter_profile
+    does). as_of scopes the dataset first, so the result equals a call on the
     pre-as_of df exactly and never sees later rows.
 
     Caveats that travel with the score: (a) it measures what a fighter
@@ -3124,24 +3275,24 @@ def assess_defensive_vulnerability(df, fighter_name, as_of=None):
     construct validity: its held-out persistence on modern careers is 0.34
     log-lik per 1k attempts, 0.11 once next-fight attempts are controlled.
 
-    Raises ValueError if the fighter has no fights in df (before as_of), or
-    if the name maps to more than one fighter_url (two distinct fighters
-    sharing a name -- resolve by scoping df).
+    fighter_name may also be a fighter_url or its id (see
+    resolve_fighter_url). Raises ValueError if the fighter has no fights in
+    df (before as_of), or if the name belongs to more than one fighter.
     """
+    # Resolve the name on the FULL df: before as_of the fighter may have
+    # fought under a different name (see resolve_fighter_url).
+    fighter_url = resolve_fighter_url(df, fighter_name)
     df_scoped = df
     if as_of is not None:
         df_scoped = df[pd.to_datetime(df['event_date']) < pd.to_datetime(as_of)]
 
-    urls = set(df_scoped.loc[df_scoped['fighter_1'] == fighter_name, 'fighter_url_fighter_1']) | \
-           set(df_scoped.loc[df_scoped['fighter_2'] == fighter_name, 'fighter_url_fighter_2'])
-    if not urls:
+    has_fights = fighter_url is not None and (df_scoped[_URL_COLS] == fighter_url).any(axis=None)
+    if not has_fights:
         raise ValueError(f"No fights found for fighter '{fighter_name}'"
                          + (f" before {pd.to_datetime(as_of).date()}" if as_of is not None else ""))
-    if len(urls) > 1:
-        raise ValueError(f"'{fighter_name}' maps to {len(urls)} distinct fighter_urls: {sorted(urls)}")
 
     population = _defensive_vulnerability_population(df_scoped)
-    return _score_defensive_vulnerability(population, urls.pop(), fighter_name)
+    return _score_defensive_vulnerability(population, fighter_url, fighter_name)
 
 
 '''15. Fighter trajectory (declining / stable / improving)'''
@@ -3178,9 +3329,11 @@ def _build_fight_long_format(df):
     opponent_quality_score correctly tracks per-fight opponent difficulty
     (e.g. lower for Renato Moicano than for Volkanovski or Della Maddalena).
     """
+    df = with_one_name_per_fighter(df)  # group by fighter, not by name string
     def side(me, opp):
         return pd.DataFrame({
-            'fighter': df[f'fighter_{me}'], 'opponent': df[f'fighter_{opp}'],
+            'fighter': df[f'fighter_{me}'], 'fighter_url': df[f'fighter_url_fighter_{me}'],
+            'opponent': df[f'fighter_{opp}'],
             'event_date': df['event_date'], 'weight_class_cleaned': df['weight_class_cleaned'],
             'is_title_bout': df['is_title_bout'], 'is_champion': df[f'is_champion_fighter_{me}'],
             'fight_result': df[f'fight_result_fighter_{me}'],
@@ -3444,7 +3597,9 @@ def current_trajectory_snapshot(df, fighter_names=None, trailing_n=3, min_baseli
     long = _build_fight_long_format(df)
     long = long.sort_values(['fighter', 'event_date'], kind='mergesort')
     if fighter_names is not None:
-        long = long[long['fighter'].isin(fighter_names)]
+        # Match by fighter_url, so any name a fighter has used finds them.
+        urls = {resolve_fighter_url(df, name) for name in fighter_names}
+        long = long[long['fighter_url'].isin(urls)]
 
     rows = []
     for fighter, g in long.groupby('fighter', sort=False):
