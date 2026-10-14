@@ -200,6 +200,10 @@ Per area, `vulnerability_ratio` is observed ÷ expected landed against: expected
 
 **Caveats that travel with the score.** (a) It measures what a fighter concedes *per attempt* — not how often they're attacked or whether they win the exchange. (b) Clinch and ground partly reflect *choosing* to trade in that position: Valentina Shevchenko (`fighter_url=132deb59abae64b1`) reads clinch-weak (z +2.05, 153 of 183) across many fights. (c) An opponent with little UFC history is represented only by the era rate, so a schedule of debutants gets era adjustment but little quality adjustment. (d) Pre-2006 fights are thin. (e) Takedown only: success per attempt falls as attempts within a fight rise (observed/expected 1.10 at one attempt, 0.86 at eight or more), so a record built entirely from 8+-attempt fights reads slightly stronger (about −0.3 z) and one built from single-attempt fights slightly weaker (about +0.4 z). (f) The opponent/era adjustment removes most but not all era drift: pre-2016 rows still read stronger (distance strong-flag share 26.7% in 2006–10 vs. 10.5% in 2021–26), so any historical comparison needs its own era control. (g) Clinch is the weakest area on evidence: its held-out persistence on modern careers is 0.34 (0.11 with next-fight attempts controlled).
 
+### 4i. Fighter style table
+
+`fighter_style_table.csv` stores §4f and §4h for every fighter at once — one row per `fighter_url`, the state after their latest UFC fight, plus where each tries to fight (takedown attempt rate, control-time share, distance/clinch/ground strike shares, submissions and ground strikes per control minute). `build_fighter_style_table` builds it from the same functions (each value equals a direct call); `run_refresh.py` rebuilds it whenever it writes `current_df.csv`, and the workflow commits both in the same PR. Load it with `load_fighter_style_table(df)`, which refuses a table built from a different dataset. Use it for "who is this fighter now" and for filters across many fighters; for any past fight call the functions with `as_of=<fight date>` instead — the table includes later fights. A full build takes about 6 minutes.
+
 ---
 
 ## 5. Planned Next Steps (v3 candidates)
@@ -232,7 +236,7 @@ Net: buildable, and the data supports a first version — but it's a v3-scale pr
 
 **What's usually shared alongside this document:** `dataset_processing_pipeline.py`, `ude_points_feature_engineering_pipeline.py`, `ude_points_algorithm.py`, and `current_df.csv`. These four are documented in full below. Everything else exists only in the project's GitHub repo (`OsyTheDataGuy/ude_points_util`) and is listed in one line each at the end of this section — detailed elsewhere in this document (§4, §8), not repeated here.
 
-**Folder layout:** the main folder holds the active pipeline files (below) plus `current_df.csv` and `fighters_df.csv`, both live files kept current by the automated pipeline (§8). No other dataset snapshots or notebooks remain locally — earlier superseded snapshots (`v2_6.csv`, `v2_6_with_phase_profiles.csv`, the raw ETL-stage `..._ready_for_features.csv`, the old `v2_5.csv`) have been deleted, not archived — `current_df.csv` is rebuilt end-to-end from raw columns on every regeneration (§3), so no intermediate snapshot is authoritative.
+**Folder layout:** the main folder holds the active pipeline files (below) plus `current_df.csv`, `fighters_df.csv` and `fighter_style_table.csv`, all live files kept current by the automated pipeline (§8). No other dataset snapshots or notebooks remain locally — earlier superseded snapshots (`v2_6.csv`, `v2_6_with_phase_profiles.csv`, the raw ETL-stage `..._ready_for_features.csv`, the old `v2_5.csv`) have been deleted, not archived — `current_df.csv` is rebuilt end-to-end from raw columns on every regeneration (§3), so no intermediate snapshot is authoritative.
 
 **Pipeline order:** `fighter_scrape_new.py` + `ude_scrape_new.py` (acquisition, incremental) → `dataset_processing_pipeline.py` (raw scrape → 1-row-per-fight) → `ude_points_feature_engineering_pipeline.py` (→ PDI/chronological features) → `ude_points_algorithm.py` (→ UDE points) → `ude_points_utils.py` (→ rankings/career views). `run_refresh.py` orchestrates the ETL-through-scoring half of this chain as one call (§8); the two scrapers run as separate steps before it.
 
@@ -247,6 +251,7 @@ Net: buildable, and the data supports a first version — but it's a v3-scale pr
 **Also in the GitHub repo, not routinely shared here:**
 * `ude_points_utils.py` — rankings/career/similarity utilities (§4a–4e); imports `is_no_score_fight` from `ude_points_algorithm.py`.
 * `fighters_df.csv` — fighter bio source (Height/Weight/Reach/Stance/DOB) keyed by `URL`, kept current by the automated pipeline; carries a `bio_scrape_attempts` retry-cap column (§8).
+* `fighter_style_table.csv` — one row per fighter: archetype, weak spots and preference fields after their latest fight (§4i); rebuilt by `run_refresh.py` alongside `current_df.csv`.
 * `fighter_scrape_new.py`, `ude_scrape_new.py`, `run_refresh.py` — the automated acquisition/refresh scripts (§8).
 * `requirements.txt`, `.github/workflows/refresh_dataset.yml` — CI dependency list and the workflow definition (§8).
 

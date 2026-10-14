@@ -3631,3 +3631,93 @@ def current_trajectory_snapshot(df, fighter_names=None, trailing_n=3, min_baseli
         rows.append(row)
 
     return pd.DataFrame(rows).sort_values('pdi_margin_gap', ascending=True).reset_index(drop=True)
+
+
+'''16. Fighter style table (one row per fighter, current state)'''
+
+# A stored snapshot of every fighter's style, weak spots and where he tries to
+# fight, AFTER his latest UFC fight. Built from the three functions above, so
+# every value equals a direct call. It answers "who is this fighter now" for
+# many fighters at once; any question about a PAST fight must still call the
+# functions with as_of=<fight date>, because this table includes later fights.
+# Rebuilt by run_refresh.py every time current_df.csv is; load it only through
+# load_fighter_style_table, which refuses a table built from a different dataset.
+
+FIGHTER_STYLE_TABLE_CSV = 'fighter_style_table.csv'
+
+# Where a fighter tries to fight, read from generate_fighter_profile.
+STYLE_TABLE_PREFERENCE_COLUMNS = [
+    'dynamic_td_attempt_rate',                    # takedown attempts per 15 min
+    'dynamic_ctrl_time_share',                    # share of cage time in control
+    'dynamic_distance_strikes_share',             # share of own strikes thrown at range
+    'dynamic_clinch_strikes_share',               # ... in the clinch
+    'dynamic_ground_strikes_share',               # ... on the ground
+    'dynamic_sub_attempts_per_control_minute',
+    'dynamic_ground_strikes_per_control_minute',
+]
+STYLE_TABLE_VULNERABILITY_FIELDS = {
+    'vulnerability_ratio': 'ratio', 'vulnerability_z': 'z', 'vulnerability_label': 'label',
+    'attempts_faced': 'attempts_faced', 'fights_with_exposure': 'fights',
+}
+
+
+def build_fighter_style_table(df):
+    """
+    One row per fighter_url: identity, archetype scores and label
+    (classify_fighter_archetype), the six-area weak-spot vector
+    (assess_defensive_vulnerability, spread wide as <area>_ratio/_z/_label/
+    _attempts_faced/_fights), and the preference columns above
+    (generate_fighter_profile). source_max_event_date/source_row_count
+    record which dataset it was built from.
+    """
+    # Weak-spot population is the same for every fighter: build it once.
+    population = _defensive_vulnerability_population(df)
+    named = with_one_name_per_fighter(df)
+    long = pd.concat([
+        named[['fight_url', 'event_date', f'fighter_url_fighter_{s}']]
+        .rename(columns={f'fighter_url_fighter_{s}': 'fighter_url'}) for s in ('1', '2')])
+    long = long.sort_values(['fighter_url', 'event_date', 'fight_url'], kind='mergesort')
+    last = long.groupby('fighter_url').agg(last_fight_date=('event_date', 'last'),
+                                           last_fight_url=('fight_url', 'last'),
+                                           ufc_fights=('fight_url', 'size'))
+
+    rows = []
+    for url, info in last.iterrows():
+        arche = classify_fighter_archetype(df, url).iloc[0]
+        prof = generate_fighter_profile(df, url).iloc[0]
+        vuln = _score_defensive_vulnerability(population, url, arche['fighter'])
+        row = {'fighter': arche['fighter'], 'fighter_url': url,
+               'weight_class_cleaned': arche['weight_class_cleaned'],
+               'last_fight_date': info['last_fight_date'], 'last_fight_url': info['last_fight_url'],
+               'ufc_fights': info['ufc_fights']}
+        for col in ['grappling_orientation', 'ground_game_style', 'striking_style', 'archetype_label',
+                    'ground_strikes_per_control_minute_max_fight_share',
+                    'sub_attempts_per_control_minute_max_fight_share']:
+            row[col] = arche[col]
+        for _, v in vuln.iterrows():
+            for src, short in STYLE_TABLE_VULNERABILITY_FIELDS.items():
+                row[f"{v['area']}_{short}"] = v[src]
+        for col in STYLE_TABLE_PREFERENCE_COLUMNS:
+            row[col] = prof[col]
+        rows.append(row)
+
+    table = pd.DataFrame(rows)
+    table['source_max_event_date'] = str(df['event_date'].max())
+    table['source_row_count'] = len(df)
+    return table.sort_values('fighter_url').reset_index(drop=True)
+
+
+def load_fighter_style_table(df, path=FIGHTER_STYLE_TABLE_CSV):
+    """
+    Read the stored style table, refusing it when it was built from a
+    different dataset than df (latest event date or row count differ):
+    rebuild with build_fighter_style_table instead of using stale rows.
+    """
+    table = pd.read_csv(path, low_memory=False)
+    built_from = (str(table['source_max_event_date'].iloc[0]), int(table['source_row_count'].iloc[0]))
+    current = (str(df['event_date'].max()), len(df))
+    if built_from != current:
+        raise ValueError(f"{path} was built from a dataset ending {built_from[0]} with {built_from[1]} rows, "
+                         f"but this one ends {current[0]} with {current[1]} rows -- rebuild it with "
+                         "build_fighter_style_table.")
+    return table

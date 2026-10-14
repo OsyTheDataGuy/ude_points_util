@@ -21,6 +21,9 @@ What this file checks, by section:
   6. Archetype            -- pinned scores and labels for known fighters.
   7. Defensive vuln.      -- pinned per-area results for known fighters.
   8. GOAT ranking         -- the canonical_project_state.md section 2a table.
+  9. Fighter style table  -- fighter_style_table.csv is one row per fighter,
+                             matches direct function calls, and refuses to
+                             load against a different dataset.
 
 How the pinned numbers stay stable: every pinned check runs with
 AS_OF = '2026-10-04', so it only sees fights up to 2026-10-03. New fights from
@@ -273,3 +276,49 @@ def test_goat_ranking_top3(df):
         '275aca31f61ba28c',  # Islam Makhachev
     ]
     assert top3['shrunk_rate'].round(3).tolist() == [4.350, 4.264, 3.673]
+
+
+# ---------------------------------------------------------------------------
+# 9. Fighter style table (fighter_style_table.csv)
+# ---------------------------------------------------------------------------
+# The table is a stored copy of the functions' output on the CURRENT dataset,
+# so these checks compare it with direct calls instead of pinning values.
+
+@pytest.fixture(scope='module')
+def style_table(df):
+    return u.load_fighter_style_table(df)
+
+
+def test_style_table_one_row_per_fighter(df, style_table):
+    fighters = pd.concat([df['fighter_url_fighter_1'], df['fighter_url_fighter_2']]).unique()
+    assert style_table['fighter_url'].is_unique
+    assert set(style_table['fighter_url']) == set(fighters)
+
+
+def test_style_table_refuses_other_dataset(df):
+    with pytest.raises(ValueError, match='rebuild'):
+        u.load_fighter_style_table(df.iloc[:-1])
+
+
+# Islam Makhachev, Brendan Allen, Christian Leroy Duncan, plus 20 random fighters.
+STYLE_TABLE_NAMED = ['275aca31f61ba28c', '2f181c0467965b98', 'a93f94c923c3a9cb']
+
+
+def test_style_table_matches_direct_calls(df, style_table):
+    sample = style_table[style_table['fighter_url'].map(url_id).isin(STYLE_TABLE_NAMED)]
+    sample = pd.concat([sample, style_table.drop(sample.index).sample(20, random_state=0)])
+    assert len(sample) == 23
+    for _, row in sample.iterrows():
+        arche = u.classify_fighter_archetype(df, row['fighter_url']).iloc[0]
+        for col in ['grappling_orientation', 'ground_game_style', 'striking_style']:
+            assert row[col] == pytest.approx(arche[col], abs=1e-9, nan_ok=True)
+        assert (row['archetype_label'] if pd.notna(row['archetype_label']) else None) == arche['archetype_label']
+        prof = u.generate_fighter_profile(df, row['fighter_url']).iloc[0]
+        for col in u.STYLE_TABLE_PREFERENCE_COLUMNS:
+            assert row[col] == pytest.approx(prof[col], abs=1e-9, nan_ok=True)
+        vuln = u.assess_defensive_vulnerability(df, row['fighter_url'])
+        for _, v in vuln.iterrows():
+            assert row[f"{v['area']}_ratio"] == pytest.approx(v['vulnerability_ratio'], abs=1e-9, nan_ok=True)
+            assert row[f"{v['area']}_z"] == pytest.approx(v['vulnerability_z'], abs=1e-9, nan_ok=True)
+            got = row[f"{v['area']}_label"]
+            assert (got if pd.notna(got) else None) == v['vulnerability_label']

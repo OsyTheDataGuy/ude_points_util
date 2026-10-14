@@ -158,6 +158,7 @@ jobs:
           add-paths: |
             fighters_df.csv
             current_df.csv
+            fighter_style_table.csv
 
       # Explicit email so a waiting PR can't be silently forgotten again, even
       # if GitHub account notifications are off/misrouted. Only fires when a PR

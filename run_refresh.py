@@ -3,7 +3,9 @@ Single entry point for a full UDE Points dataset refresh.
 
 Chains: run_etl_pipeline -> Stance backfill -> engineer_all_features ->
 calculate_ude_points_with_ablation -> add_ude_points_difference_columns ->
-validate_dataset_regeneration -> write the new production file.
+validate_dataset_regeneration -> write the new production file -> rebuild
+fighter_style_table.csv (one row per fighter, see ude_points_utils section 16)
+next to it, so the two files always come from the same data.
 
 Note --current-dataset and --previous-production-file are NOT the same
 file: --current-dataset (e.g. current_df.csv) is the raw/ETL-stage
@@ -19,6 +21,7 @@ Actions workflow should treat that exit code as "stop, don't open a PR."
 """
 
 import argparse
+import os
 import sys
 
 import pandas as pd
@@ -26,6 +29,7 @@ import pandas as pd
 from dataset_processing_pipeline import run_etl_pipeline, validate_dataset_regeneration
 from ude_points_feature_engineering_pipeline import engineer_all_features
 from ude_points_algorithm import calculate_ude_points_with_ablation, add_ude_points_difference_columns
+from ude_points_utils import build_fighter_style_table, FIGHTER_STYLE_TABLE_CSV
 
 
 def backfill_stance(raw_df: pd.DataFrame, fighters_df: pd.DataFrame) -> pd.DataFrame:
@@ -87,6 +91,13 @@ def run_refresh(current_dataset_csv, fighters_csv, latest_fights_csv, latest_eve
 
     final.to_csv(output_csv, index=False)
     print(f"Wrote {output_csv}. New fights added this run: {len(result['new_keys'])}.")
+
+    # Rebuilt from the file just written (read back, so its source stamp matches
+    # exactly what load_fighter_style_table will compare against).
+    style_csv = os.path.join(os.path.dirname(output_csv), FIGHTER_STYLE_TABLE_CSV)
+    print("Rebuilding the fighter style table...")
+    build_fighter_style_table(pd.read_csv(output_csv, low_memory=False)).to_csv(style_csv, index=False)
+    print(f"Wrote {style_csv}.")
     return result
 
 
