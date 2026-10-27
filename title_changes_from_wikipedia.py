@@ -54,6 +54,14 @@ DATE = r'([A-Z][a-z]{2,8}\.? \d{1,2}, \d{4})'
 # Wikipedia name -> UFCStats name, where the two differ beyond spelling.
 ALIASES = {'Cris Cyborg': 'Cristiane Justino'}
 
+# Notes the script can't read whose events are already entered by hand. Matched
+# on the note's opening words, so any other unreadable note is always reported.
+KNOWN_UNREAD_NOTES = (
+    'Couture was stripped of the title in January 1998',
+    'Rutten vacated the title in June 1999',
+    'Both McGregor and Ferguson were stripped of their titles on April 7, 2018',
+)
+
 # Two events of the same fighter, division and type within this many days are
 # the same event (the file's hand-set date may differ from the page's).
 SAME_EVENT_DAYS = 31
@@ -234,7 +242,8 @@ def new_events(page_events, known, roster, revid):
                      & (known.event == e.event) & ((known.date - e.date).abs() <= pd.Timedelta(days=SAME_EVENT_DAYS))]
         if len(same) == 0:
             name = roster.loc[roster.url == url, 'name'].iloc[0]
-            added.append({'date': e.date, 'date_precision': 'day', 'weight_class_cleaned': e.weight_class_cleaned,
+            added.append({'date': e.date, 'date_precision': 'day', 'fight_day_timing': '',
+                          'weight_class_cleaned': e.weight_class_cleaned,
                           'fighter': name, 'fighter_url': url, 'event': e.event,
                           'note': f'Added from Wikipedia on {date.today().isoformat()}; check before merging',
                           'source': SOURCE, 'source_revision_url': REVISION_URL.format(revid),
@@ -315,19 +324,27 @@ def run(dataset_csv, events_csv, report_path):
             lines.append(f'**{len(added)} new event(s) added to `{events_csv}` -- check each before merging:**')
             lines += [f'- {r.date.date()} {r.weight_class_cleaned} {r.fighter} ({r.fighter_url.rsplit("/", 1)[-1]}): {r.event}'
                       for r in added.itertuples()]
+            fight_days = set()
+            for s in ('1', '2'):
+                fight_days |= set(zip(pd.to_datetime(df['event_date']), df[f'fighter_url_fighter_{s}'],
+                                      df['weight_class_cleaned']))
+            same_day = [r for r in added.itertuples() if (r.date, r.fighter_url, r.weight_class_cleaned) in fight_days]
+            if same_day:
+                lines.append('**Same day as that fighter\'s fight -- set fight_day_timing (before_card / after_card) '
+                             'on these rows; the pipeline stops until it is set:**')
+                lines += [f'- {r.date.date()} {r.fighter}: {r.event}' for r in same_day]
         else:
             lines.append('No new title changes on the page.')
         if unmatched:
             lines.append('')
             lines.append('**Warning -- page events whose fighter could not be matched (add by hand if real):**')
             lines += [f'- {d} {wc} {name}: {ev}' for d, wc, name, ev in unmatched]
-        # Skip notes already covered by a hand-kept row (a fighter of that division named in the note).
-        covered = lambda wc, text: any(_norm(f).split()[-1] in _norm(text).split()
-                                       for f in known.loc[known.weight_class_cleaned == wc, 'fighter'])
-        notes_unread = [s for s in skipped if not s[1].startswith('draw') and not covered(s[0], s[2])]
+        notes_unread = [s for s in skipped if not s[1].startswith('draw')
+                        and not s[2].startswith(KNOWN_UNREAD_NOTES)]
         if notes_unread:
             lines.append('')
-            lines.append(f'{len(notes_unread)} note(s) not read automatically (already covered by hand-kept rows unless new):')
+            lines.append(f'**Warning -- {len(notes_unread)} note(s) the script could not read; add rows by hand if they '
+                         f'are title changes, then add the note to KNOWN_UNREAD_NOTES:**')
             lines += [f'- {wc}: {reason} -- "{text}"' for wc, reason, text in notes_unread]
 
         check = check_against_page(df, reigns, defenses, notes, roster)

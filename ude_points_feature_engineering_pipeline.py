@@ -69,9 +69,27 @@ TITLE_CHANGES_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ti
 
 
 def load_title_changes(path=TITLE_CHANGES_CSV):
-    """Off-cage title events, oldest first: date, weight_class_cleaned, fighter_url, event."""
-    events = pd.read_csv(path, parse_dates=['date'])
-    return events.sort_values(['date', 'fighter_url'], kind='stable').reset_index(drop=True)
+    """Off-cage title events, oldest first (same day: 'before_card' events first):
+    date, fight_day_timing, weight_class_cleaned, fighter_url, event."""
+    events = pd.read_csv(path, parse_dates=['date'], keep_default_na=False)
+    events['_after'] = (events['fight_day_timing'] != 'before_card').astype(int)
+    events = events.sort_values(['date', '_after', 'fighter_url'], kind='stable')
+    return events.drop(columns='_after').reset_index(drop=True)
+
+
+def check_fight_day_timing(df, events):
+    """Raise if an event falls on a day its fighter fights in that division and
+    fight_day_timing doesn't say whether it came before or after the card --
+    the data has no time of day, so that can't be guessed."""
+    fights = set()
+    for s in ('1', '2'):
+        fights |= set(zip(pd.to_datetime(df['event_date']), df[f'fighter_url_fighter_{s}'], df['weight_class_cleaned']))
+    unset = [f"{e.date.date()} {e.weight_class_cleaned} {e.fighter_url}: {e.event}" for e in events.itertuples()
+             if (e.date, e.fighter_url, e.weight_class_cleaned) in fights
+             and e.fight_day_timing not in ('before_card', 'after_card')]
+    if unset:
+        raise ValueError("title_changes_outside_cage.csv: set fight_day_timing ('before_card' or 'after_card') "
+                         "for events on a day the fighter fights: " + "; ".join(unset))
 
 
 def update_champion_status(df, title_changes=None):
@@ -81,15 +99,18 @@ def update_champion_status(df, title_changes=None):
 
     title_changes (default: load_title_changes()) is applied before each card:
     'promoted' sets 2, 'stripped'/'vacated' clear a 2, 'interim_stripped'
-    clears a 1. An event dated on a fight day applies after that card (Khabib
-    retired the night he beat Gaethje). The succession rule below stays as
-    the fallback for any event not yet in the file.
+    clears a 1. An event on a day the fighter fights must say whether it came
+    before or after the card (fight_day_timing: Oliveira stripped at the
+    weigh-in, Khabib retired after his fight); check_fight_day_timing stops
+    the run if it doesn't. Other same-day events apply after the card. The
+    succession rule below stays as the fallback for any event not yet in the file.
     """
     champ_1, champ_2 = [], []
     fighter_champions = {}
     undisputed_holders = {}  # weight class -> fighters currently flagged 2
 
     events = load_title_changes() if title_changes is None else title_changes
+    check_fight_day_timing(df, events)
     events = list(events.itertuples(index=False))
     next_event = 0
 
@@ -99,8 +120,10 @@ def update_champion_status(df, title_changes=None):
         f1, f2 = row.fighter_url_fighter_1, row.fighter_url_fighter_2  # by fighter, not name
         r1, r2 = row.fight_result_fighter_1, row.fight_result_fighter_2
 
-        # Off-cage title changes dated before this card.
-        while next_event < len(events) and events[next_event].date < pd.Timestamp(row.event_date):
+        # Off-cage title changes dated before this card, or on its day and marked before it.
+        card_day = pd.Timestamp(row.event_date)
+        while next_event < len(events) and (events[next_event].date < card_day or (
+                events[next_event].date == card_day and events[next_event].fight_day_timing == 'before_card')):
             ev = events[next_event]
             next_event += 1
             status = fighter_champions.setdefault(ev.fighter_url, {}).setdefault(ev.weight_class_cleaned, {'status': 0})

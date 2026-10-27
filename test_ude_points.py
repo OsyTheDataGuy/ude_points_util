@@ -183,6 +183,25 @@ def test_stripped_champion_not_flagged(df):
     assert row[f'is_champion_{side}'] == 0
 
 
+def test_fight_day_strip_applies_before_the_card(df):
+    # Oliveira (07225ba28ae309b6) was stripped on the day of UFC 274
+    # (7d4e49d8a6678157), at the weigh-in, so he enters that fight without
+    # the belt (fight_day_timing = before_card).
+    row = df[df['fight_url'].str.endswith('7d4e49d8a6678157')].iloc[0]
+    side = 'fighter_1' if row['fighter_url_fighter_1'].endswith('07225ba28ae309b6') else 'fighter_2'
+    assert row[f'is_champion_{side}'] == 0
+
+
+def test_fight_day_event_without_timing_stops(df):
+    # An event on a day the fighter fights can't be ordered without
+    # fight_day_timing: blank Khabib's and the pipeline must refuse.
+    from ude_points_feature_engineering_pipeline import load_title_changes, check_fight_day_timing
+    events = load_title_changes()
+    events.loc[events['fighter'] == 'Khabib Nurmagomedov', 'fight_day_timing'] = ''
+    with pytest.raises(ValueError, match='fight_day_timing'):
+        check_fight_day_timing(df, events)
+
+
 def test_title_changes_file_is_clean(df):
     # Every off-cage event names a fighter in the dataset, a known event type,
     # and a division that fighter has fought in.
@@ -193,6 +212,7 @@ def test_title_changes_file_is_clean(df):
     assert set(events['date_precision']) <= {'day', 'month'}
     assert (events.loc[events['date_precision'] == 'month', 'date'].dt.day == 15).all()
     assert events['source_revision_url'].str.contains('oldid=').all()
+    assert set(events['fight_day_timing']) <= {'', 'before_card', 'after_card'}
     pairs = set(zip(df['fighter_url_fighter_1'], df['weight_class_cleaned'])) | \
         set(zip(df['fighter_url_fighter_2'], df['weight_class_cleaned']))
     missing = [(e.fighter, e.weight_class_cleaned) for e in events.itertuples()
