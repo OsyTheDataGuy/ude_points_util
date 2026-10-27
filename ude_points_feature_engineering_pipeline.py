@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """# 5. Feature Engineering for ude points - Dictionary Batched"""
 
+import os
+
 import pandas as pd
 import numpy as np
 
@@ -60,20 +62,57 @@ def map_weight_class(weight_class):
 
 """## 3. Create is_champion column"""
 
-def update_champion_status(df):
+# Title changes that happen outside the cage (strips, vacated belts, promotions,
+# champions brought over from WEC/Strikeforce). UFCStats has no record of them;
+# the file is hand-kept from Wikipedia's "List of UFC champions".
+TITLE_CHANGES_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'title_changes_outside_cage.csv')
+
+
+def load_title_changes(path=TITLE_CHANGES_CSV):
+    """Off-cage title events, oldest first: date, weight_class_cleaned, fighter_url, event."""
+    events = pd.read_csv(path, parse_dates=['date'])
+    return events.sort_values(['date', 'fighter_url'], kind='stable').reset_index(drop=True)
+
+
+def update_champion_status(df, title_changes=None):
     """
     Update champion status for fighters sequentially.
     Assumes chronological sort (ascending=True).
+
+    title_changes (default: load_title_changes()) is applied before each card:
+    'promoted' sets 2, 'stripped'/'vacated' clear a 2, 'interim_stripped'
+    clears a 1. An event dated on a fight day applies after that card (Khabib
+    retired the night he beat Gaethje). The succession rule below stays as
+    the fallback for any event not yet in the file.
     """
     champ_1, champ_2 = [], []
     fighter_champions = {}
     undisputed_holders = {}  # weight class -> fighters currently flagged 2
+
+    events = load_title_changes() if title_changes is None else title_changes
+    events = list(events.itertuples(index=False))
+    next_event = 0
 
     for row in df.itertuples(index=False):
         is_tb = getattr(row, 'is_title_bout', 0)
         wc = getattr(row, 'weight_class_cleaned', '')
         f1, f2 = row.fighter_url_fighter_1, row.fighter_url_fighter_2  # by fighter, not name
         r1, r2 = row.fight_result_fighter_1, row.fight_result_fighter_2
+
+        # Off-cage title changes dated before this card.
+        while next_event < len(events) and events[next_event].date < pd.Timestamp(row.event_date):
+            ev = events[next_event]
+            next_event += 1
+            status = fighter_champions.setdefault(ev.fighter_url, {}).setdefault(ev.weight_class_cleaned, {'status': 0})
+            holders = undisputed_holders.setdefault(ev.weight_class_cleaned, set())
+            if ev.event == 'promoted':
+                status['status'] = 2
+                holders.add(ev.fighter_url)
+            elif ev.event in ('stripped', 'vacated') and status['status'] == 2:
+                status['status'] = 0
+                holders.discard(ev.fighter_url)
+            elif ev.event == 'interim_stripped' and status['status'] == 1:
+                status['status'] = 0
 
         if f1 not in fighter_champions: fighter_champions[f1] = {}
         if wc not in fighter_champions[f1]: fighter_champions[f1][wc] = {'status': 0}
