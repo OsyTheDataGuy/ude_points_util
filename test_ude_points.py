@@ -189,6 +189,10 @@ def test_title_changes_file_is_clean(df):
     from ude_points_feature_engineering_pipeline import load_title_changes
     events = load_title_changes()
     assert set(events['event']) <= {'promoted', 'stripped', 'vacated', 'interim_stripped'}
+    # Month-only dates stay marked as estimates (stored mid-month), apart from exact ones.
+    assert set(events['date_precision']) <= {'day', 'month'}
+    assert (events.loc[events['date_precision'] == 'month', 'date'].dt.day == 15).all()
+    assert events['source_revision_url'].str.contains('oldid=').all()
     pairs = set(zip(df['fighter_url_fighter_1'], df['weight_class_cleaned'])) | \
         set(zip(df['fighter_url_fighter_2'], df['weight_class_cleaned']))
     missing = [(e.fighter, e.weight_class_cleaned) for e in events.itertuples()

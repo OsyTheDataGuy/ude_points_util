@@ -27,6 +27,7 @@ Run:  python title_changes_from_wikipedia.py --dataset current_df.csv \\
 """
 
 import argparse
+import json
 import re
 import unicodedata
 import urllib.request
@@ -34,7 +35,9 @@ from datetime import date
 
 import pandas as pd
 
-WIKI_RAW_URL = 'https://en.wikipedia.org/w/index.php?title=List_of_UFC_champions&action=raw'
+WIKI_API_URL = ('https://en.wikipedia.org/w/api.php?action=query&prop=revisions&titles=List_of_UFC_champions'
+                '&rvprop=ids|content&rvslots=main&format=json&formatversion=2')
+REVISION_URL = 'https://en.wikipedia.org/w/index.php?title=List_of_UFC_champions&oldid={}'
 SOURCE = 'Wikipedia: List of UFC champions'
 
 # Section heading -> weight_class_cleaned
@@ -58,10 +61,32 @@ SAME_EVENT_DAYS = 31
 
 """## 1-2. Fetch and parse the page"""
 
-def fetch_wikitext(url=WIKI_RAW_URL):
+def fetch_wikitext(url=WIKI_API_URL):
+    """(wikitext, revision id) of the page's current version."""
     req = urllib.request.Request(url, headers={'User-Agent': 'ude-points-refresh/1.0 (title-changes check)'})
     with urllib.request.urlopen(req, timeout=60) as resp:
-        return resp.read().decode('utf-8')
+        rev = json.loads(resp.read().decode('utf-8'))['query']['pages'][0]['revisions'][0]
+    return rev['slots']['main']['content'], rev['revid']
+
+
+def _ref_url(text, named=None):
+    """First cited URL in a wikitext fragment (the note's or reign's <ref>), or ''.
+    A reused citation (<ref name="x" />) is looked up in named."""
+    m = re.search(r'\|\s*url\s*=\s*(\S+?)\s*(?:\||\}\})', text)
+    if m:
+        return m.group(1)
+    reuse = re.search(r'<ref name="?([^"/>]+?)"?\s*/>', text)
+    return (named or {}).get(reuse.group(1), '') if reuse else ''
+
+
+def _named_refs(wikitext):
+    """name -> cited URL for every named citation defined on the page."""
+    out = {}
+    for m in re.finditer(r'<ref name="?([^"/>]+?)"?\s*>(.*?)</ref>', wikitext, flags=re.S):
+        url = _ref_url(m.group(2))
+        if url:
+            out.setdefault(m.group(1), url)
+    return out
 
 
 def _link_name(s):
@@ -77,6 +102,7 @@ def _to_date(s):
 def parse_page(wikitext):
     """Reigns, their listed defenses, and note rows, in page order per division."""
     lines = wikitext.split('\n')
+    named = _named_refs(wikitext)
     reigns, defenses, notes = [], [], []
     wc, i = None, 0
     while i < len(lines):
@@ -89,7 +115,12 @@ def parse_page(wikitext):
             wc = None
         elif wc and re.match(r'^!\s*colspan', line):
             text = line.split("''", 1)[1] if "''" in line else line
-            notes.append({'pos': i, 'wc': wc, 'text': re.sub(r'<ref.*', '', text).strip("' ")})
+            # A note's <ref> can run over several lines; read to the end of the row.
+            k = i + 1
+            while k < len(lines) and not lines[k].startswith(('|-', '|}', '!')):
+                k += 1
+            notes.append({'pos': i, 'wc': wc, 'text': re.sub(r'<ref.*', '', text).strip("' "),
+                          'ref_url': _ref_url('\n'.join(lines[i:k]), named)})
         elif wc and re.match(r'^!\s*(\d+|—)\s*$', line):
             block, j = [], i + 1
             while j < len(lines) and not lines[j].startswith(('|-', '|}', '==')):
@@ -99,7 +130,7 @@ def parse_page(wikitext):
             start = re.search(r'(?:align=center|text-align:center;")\|\s*' + DATE, text)
             name = _link_name(block[0]) if block else None
             interim = '—' in line
-            reigns.append({'pos': i, 'wc': wc, 'fighter': name, 'interim': interim,
+            reigns.append({'pos': i, 'wc': wc, 'fighter': name, 'interim': interim, 'ref_url': _ref_url(text, named),
                            'promoted': bool(block) and 'promoted to undisputed' in block[0],
                            'start': _to_date(start.group(1)) if start else None})
             for m in re.finditer(r'def\. (.+?) at (?:\[\[.+?\]\]|[^<]+?) on ' + DATE, text):
@@ -148,11 +179,16 @@ def events_from_page(reigns, notes):
             # (any word of the reign name, so "Zhang" finds "Zhang Weili").
             same = above[above.fighter.map(lambda f: _norm(found[0]).split()[-1] in _norm(f).split())]
             name = same.fighter.iloc[-1] if len(same) else found[0]
-            events.append({'date': found[2], 'weight_class_cleaned': n.wc, 'fighter': name, 'event': found[1]})
+            events.append({'date': found[2], 'weight_class_cleaned': n.wc, 'fighter': name, 'event': found[1],
+                           'reference_url': n.ref_url})
         else:
             skipped.append((n.wc, reason, n.text[:120]))
     for r in reigns[reigns.promoted].itertuples():
-        events.append({'date': r.start, 'weight_class_cleaned': r.wc, 'fighter': r.fighter, 'event': 'promoted'})
+        # A promotion's source usually sits on the same day's vacate/strip note.
+        same_day = [e['reference_url'] for e in events if e['weight_class_cleaned'] == r.wc
+                    and e['date'] == r.start and e['reference_url']]
+        events.append({'date': r.start, 'weight_class_cleaned': r.wc, 'fighter': r.fighter, 'event': 'promoted',
+                       'reference_url': r.ref_url or (same_day[0] if same_day else '')})
     return pd.DataFrame(events), skipped
 
 
@@ -186,7 +222,7 @@ def match_fighter(name, wc, roster):
 
 """## 5. New events only"""
 
-def new_events(page_events, known, roster):
+def new_events(page_events, known, roster, revid):
     """Page events not already in the file (same fighter, division, type within SAME_EVENT_DAYS)."""
     added, unmatched = [], []
     for e in page_events.itertuples():
@@ -198,10 +234,11 @@ def new_events(page_events, known, roster):
                      & (known.event == e.event) & ((known.date - e.date).abs() <= pd.Timedelta(days=SAME_EVENT_DAYS))]
         if len(same) == 0:
             name = roster.loc[roster.url == url, 'name'].iloc[0]
-            added.append({'date': e.date, 'weight_class_cleaned': e.weight_class_cleaned, 'fighter': name,
-                          'fighter_url': url, 'event': e.event,
+            added.append({'date': e.date, 'date_precision': 'day', 'weight_class_cleaned': e.weight_class_cleaned,
+                          'fighter': name, 'fighter_url': url, 'event': e.event,
                           'note': f'Added from Wikipedia on {date.today().isoformat()}; check before merging',
-                          'source': SOURCE})
+                          'source': SOURCE, 'source_revision_url': REVISION_URL.format(revid),
+                          'reference_url': e.reference_url})
     return pd.DataFrame(added), unmatched
 
 
@@ -262,12 +299,15 @@ def run(dataset_csv, events_csv, report_path):
         df = pd.read_csv(dataset_csv, low_memory=False)
         known = pd.read_csv(events_csv, parse_dates=['date'], keep_default_na=False)
         roster = _fighters_by_division(df)
-        reigns, defenses, notes = parse_page(fetch_wikitext())
+        wikitext, revid = fetch_wikitext()
+        reigns, defenses, notes = parse_page(wikitext)
         if reigns.empty or notes.empty:
             raise ValueError('page parsed to no reigns or notes -- its layout may have changed')
         page_events, skipped = events_from_page(reigns, notes)
-        added, unmatched = new_events(page_events, known, roster)
+        added, unmatched = new_events(page_events, known, roster, revid)
 
+        lines.append(f'Page version checked: {REVISION_URL.format(revid)}')
+        lines.append('')
         if len(added):
             out = pd.concat([known, added], ignore_index=True).sort_values(['date', 'weight_class_cleaned', 'event'])
             out['date'] = pd.to_datetime(out['date']).dt.strftime('%Y-%m-%d')

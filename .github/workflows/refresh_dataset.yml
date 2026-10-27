@@ -92,14 +92,15 @@ jobs:
             --fight-details-csv "base datasets from greco github/ufc_fight_details.csv" \
             --current-dataset-csv current_df.csv \
             --output latest_fights_df.csv
-          # ude_scrape_new.py writes no file when there are no new fights.
-          # The steps below need that file, so they are skipped and the run
-          # ends green with nothing to merge.
+          # ude_scrape_new.py exits non-zero (failing this step) when fights
+          # are waiting but none could be scraped, and writes no file only
+          # when nothing is waiting. So a missing file here means "no new
+          # fights", never "scrape failed".
           if [ -f latest_fights_df.csv ]; then
             echo "new_fights=true" >> "$GITHUB_OUTPUT"
           else
             echo "new_fights=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No new fights since the last refresh -- nothing to do."
+            echo "::notice::No new fights since the last refresh."
           fi
 
       - name: Scrape fighter bios (incremental)
@@ -116,19 +117,26 @@ jobs:
       # title_changes_outside_cage.csv, which update_champion_status reads.
       # Existing rows are never changed. Never fails the run: a fetch or parse
       # problem becomes a warning in title_changes_report.md, which the next
-      # step adds to the PR body. An event dated before fights already in the
-      # data would change their flags; validation below then stops the run on
-      # purpose (that is a deliberate re-score, done by hand).
+      # step adds to the PR body. Runs every week, new fights or not; if it
+      # adds a row, the pipeline and PR steps run even with no new fights. An
+      # event dated before fights already in the data would change their
+      # flags; validation below then stops the run on purpose (that is a
+      # deliberate re-score, done by hand).
       - name: Add title changes from Wikipedia
-        if: steps.scrape.outputs.new_fights == 'true'
+        id: wiki
         run: |
           python title_changes_from_wikipedia.py \
             --dataset current_df.csv \
             --events title_changes_outside_cage.csv \
             --report title_changes_report.md
+          if git diff --quiet -- title_changes_outside_cage.csv; then
+            echo "title_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "title_changes=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Run full pipeline + validation
-        if: steps.scrape.outputs.new_fights == 'true'
+        if: steps.scrape.outputs.new_fights == 'true' || steps.wiki.outputs.title_changes == 'true'
         run: |
           # set -o pipefail: this runner's default shell for `run:` does NOT
           # propagate a failing left-hand command through a pipe -- confirmed
@@ -155,6 +163,10 @@ jobs:
             --numeric-tolerance 0.01 \
             | tee refresh_summary.txt
           cat title_changes_report.md >> refresh_summary.txt
+          if [ -f failed_urls.csv ]; then
+            printf '\n## Fights that failed to scrape\n\n%s fight(s) failed and will be retried next refresh (not in current_df.csv yet).\n' \
+              "$(($(wc -l < failed_urls.csv) - 1))" >> refresh_summary.txt
+          fi
           # --numeric-tolerance 0.01: the method-PDI GLM / age IRLS fits differ
           # in the 3rd-4th decimal between this Linux runner's BLAS and whatever
           # built the committed current_df.csv. requirements.txt pins the
@@ -172,7 +184,7 @@ jobs:
 
       - name: Open PR with the refreshed dataset
         id: cpr
-        if: success() && steps.scrape.outputs.new_fights == 'true'
+        if: success() && (steps.scrape.outputs.new_fights == 'true' || steps.wiki.outputs.title_changes == 'true')
         uses: peter-evans/create-pull-request@v6
         with:
           commit-message: "Weekly dataset refresh"
