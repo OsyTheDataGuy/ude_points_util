@@ -13,7 +13,8 @@ What this file checks, by section:
   3. Fighter identity     -- fighters are matched by fighter_url, not name:
                              a renamed fighter's career stays whole, two
                              fighters sharing a name stay apart. Title
-                             defenses skip the fight that won the belt.
+                             defenses skip the fight that won the belt, and
+                             off-cage strips/promotions are applied.
   4. Fighter profile      -- the profile's dynamic_* state equals what the
                              pipeline itself stores, and it includes the
                              fighter's latest fight.
@@ -155,6 +156,15 @@ def test_pipeline_records_follow_fighter_url(df, fight_id, fighter_id, record):
     # Jon Jones entering Reyes: 2. Winning the vacant belt from Gustafsson
     # (ceaae1db8ccde29c) while still flagged interim is not a defense.
     ('fae99a4089f8abb0', '07f72a2a7591b409', 2),
+    # Off-cage title changes (title_changes_outside_cage.csv):
+    # Ronda Rousey entering Holm: 6. She came from Strikeforce as champion,
+    # so her first UFC title fight (Carmouche) is defense #1.
+    ('08af25ef4252b138', '8bdac25ce0bb874d', 6),
+    # Jose Aldo entering McGregor: 7. Same for his WEC transfer (Hominick #1).
+    ('b302e12550278ffd', 'd0f3959b4a9747e6', 7),
+    # Khabib Nurmagomedov entering Gaethje: 2. He retired that night, after
+    # the fight -- an event dated on fight day applies after the card.
+    ('59eea37af7efb06c', '032cc3922d871c7f', 2),
 ])
 def test_title_defenses_skip_belt_winning_fight(df, fight_id, fighter_id, defenses):
     # Only a win by the undisputed champion (is_champion == 2) in an
@@ -162,6 +172,28 @@ def test_title_defenses_skip_belt_winning_fight(df, fight_id, fighter_id, defens
     row = df[df['fight_url'].str.endswith(fight_id)].iloc[0]
     side = 'fighter_1' if row['fighter_url_fighter_1'].endswith(fighter_id) else 'fighter_2'
     assert row[f'title_defenses_{side}'] == defenses
+
+
+def test_stripped_champion_not_flagged(df):
+    # Charles Oliveira (07225ba28ae309b6) was stripped at the UFC 274
+    # weigh-in, so he enters UFC 280 vs Makhachev (523815acf1bb2420) without
+    # the belt.
+    row = df[df['fight_url'].str.endswith('523815acf1bb2420')].iloc[0]
+    side = 'fighter_1' if row['fighter_url_fighter_1'].endswith('07225ba28ae309b6') else 'fighter_2'
+    assert row[f'is_champion_{side}'] == 0
+
+
+def test_title_changes_file_is_clean(df):
+    # Every off-cage event names a fighter in the dataset, a known event type,
+    # and a division that fighter has fought in.
+    from ude_points_feature_engineering_pipeline import load_title_changes
+    events = load_title_changes()
+    assert set(events['event']) <= {'promoted', 'stripped', 'vacated', 'interim_stripped'}
+    pairs = set(zip(df['fighter_url_fighter_1'], df['weight_class_cleaned'])) | \
+        set(zip(df['fighter_url_fighter_2'], df['weight_class_cleaned']))
+    missing = [(e.fighter, e.weight_class_cleaned) for e in events.itertuples()
+               if (e.fighter_url, e.weight_class_cleaned) not in pairs]
+    assert not missing, missing
 
 
 def test_rankings_keep_shared_name_fighters_apart(df):
@@ -292,7 +324,7 @@ def test_goat_ranking_top3(df):
         '07f72a2a7591b409',  # Jon Jones
         '275aca31f61ba28c',  # Islam Makhachev
     ]
-    assert top3['shrunk_rate'].round(3).tolist() == [4.308, 4.246, 3.671]
+    assert top3['shrunk_rate'].round(3).tolist() == [4.308, 4.246, 3.645]
 
 
 # ---------------------------------------------------------------------------

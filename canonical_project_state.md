@@ -1,6 +1,6 @@
 # UDE Points — Canonical Project State
 
-**v2.6 in production (formulas locked 21 August 2026).** The scoring formulas in `ude_points_algorithm.py` are the v2.6 set; same-date fights are scored in `fight_url` order so regeneration is reproducible. Scored outputs also depend on the champion-status and title-defense inputs built in `ude_points_feature_engineering_pipeline.py`, which end an undisputed reign when the holder is stripped or vacates (succession rule, `data_integrity_and_invariants.md`). `ude_points_utils.py` sits downstream of scoring: it reads scores, and the one helper the pipeline borrows from it (`_shrink_rate`) builds only `dynamic_*` columns that scoring does not read (§4).
+**v2.6 in production (formulas locked 21 August 2026).** The scoring formulas in `ude_points_algorithm.py` are the v2.6 set; same-date fights are scored in `fight_url` order so regeneration is reproducible. Scored outputs also depend on the champion-status and title-defense inputs built in `ude_points_feature_engineering_pipeline.py`, which apply off-cage title changes (strips, vacated belts, promotions) from the hand-kept `title_changes_outside_cage.csv`, with a succession rule as the fallback (`data_integrity_and_invariants.md`). `ude_points_utils.py` sits downstream of scoring: it reads scores, and the one helper the pipeline borrows from it (`_shrink_rate`) builds only `dynamic_*` columns that scoring does not read (§4).
 
 This document is the **authoritative compact context** for continuing the UDE Points project — architecture, decisions in force, known tradeoffs. It holds current state only, not a history of how it was reached. For data-integrity corrections and load-bearing invariants that aren't obvious from the code, see `data_integrity_and_invariants.md`.
 
@@ -57,22 +57,22 @@ Per fighter-side, per fight, in order: `raw_base_points` (±3 W/L) → `champion
 |---|---|---|---|---|---|
 | 1 | Georges St-Pierre | 20-2-0 | 22 | 149.3 | 4.308 |
 | 2 | Jon Jones | 22-1-0 | 24 | 155.9 | 4.246 |
-| 3 | Islam Makhachev | 18-1-0 | 19 | 117.9 | 3.671 |
+| 3 | Islam Makhachev | 18-1-0 | 19 | 117.2 | 3.645 |
 | 4 | Demetrious Johnson | 15-2-1 | 18 | 94.7 | 2.971 |
-| 5 | Amanda Nunes | 16-2-0 | 18 | 91.5 | 2.856 |
+| 5 | Amanda Nunes | 16-2-0 | 18 | 91.6 | 2.861 |
 | 6 | Valentina Shevchenko | 15-3-1 | 19 | 87.7 | 2.629 |
-| 7 | Khabib Nurmagomedov | 13-0-0 | 13 | 69.5 | 2.521 |
-| 8 | Alexander Volkanovski | 15-3-0 | 18 | 80.1 | 2.450 |
-| 9 | Merab Dvalishvili | 14-3-0 | 17 | 63.8 | 1.939 |
-| 10 | Alex Pereira | 10-3-0 | 13 | 54.1 | 1.851 |
-| 11 | Ilia Topuria | 9-1-0 | 10 | 48.4 | 1.846 |
-| 12 | Dricus Du Plessis | 10-1-0 | 11 | 49.4 | 1.805 |
-| 13 | Daniel Cormier | 11-3-0 | 15 | 55.9 | 1.776 |
+| 7 | Khabib Nurmagomedov | 13-0-0 | 13 | 69.5 | 2.522 |
+| 8 | Alexander Volkanovski | 15-3-0 | 18 | 80.0 | 2.448 |
+| 9 | Merab Dvalishvili | 14-3-0 | 17 | 63.9 | 1.941 |
+| 10 | Alex Pereira | 10-3-0 | 13 | 54.1 | 1.852 |
+| 11 | Ilia Topuria | 9-1-0 | 10 | 48.5 | 1.849 |
+| 12 | Dricus Du Plessis | 10-1-0 | 11 | 49.4 | 1.806 |
+| 13 | Daniel Cormier | 11-3-0 | 15 | 55.8 | 1.770 |
 | 14 | Francis Ngannou | 12-2-0 | 14 | 51.4 | 1.661 |
-| 15 | Joshua Van | 11-1-0 | 12 | 47.2 | 1.623 |
-| 16 | Justin Gaethje | 11-5-0 | 16 | 53.3 | 1.609 |
-| 17 | Kamaru Usman | 16-4-0 | 20 | 56.7 | 1.507 |
-| 18 | Khamzat Chimaev | 9-1-0 | 10 | 40.8 | 1.468 |
+| 15 | Joshua Van | 11-1-0 | 12 | 47.2 | 1.622 |
+| 16 | Justin Gaethje | 11-5-0 | 16 | 53.4 | 1.610 |
+| 17 | Kamaru Usman | 16-4-0 | 20 | 56.7 | 1.506 |
+| 18 | Khamzat Chimaev | 9-1-0 | 10 | 40.9 | 1.468 |
 | 19 | Movsar Evloev | 10-0-0 | 10 | 40.6 | 1.455 |
 | 20 | Benson Henderson | 11-3-0 | 14 | 45.7 | 1.425 |
 
@@ -236,7 +236,7 @@ Net: buildable, and the data supports a first version — but it's a v3-scale pr
 
 **What's usually shared alongside this document:** `dataset_processing_pipeline.py`, `ude_points_feature_engineering_pipeline.py`, `ude_points_algorithm.py`, and `current_df.csv`. These four are documented in full below. Everything else exists only in the project's GitHub repo (`OsyTheDataGuy/ude_points_util`) and is listed in one line each at the end of this section — detailed elsewhere in this document (§4, §8), not repeated here.
 
-**Folder layout:** the main folder holds the active pipeline files (below) plus `current_df.csv`, `fighters_df.csv` and `fighter_style_table.csv`, all live files kept current by the automated pipeline (§8). No other dataset snapshots or notebooks remain locally — earlier superseded snapshots (`v2_6.csv`, `v2_6_with_phase_profiles.csv`, the raw ETL-stage `..._ready_for_features.csv`, the old `v2_5.csv`) have been deleted, not archived — `current_df.csv` is rebuilt end-to-end from raw columns on every regeneration (§3), so no intermediate snapshot is authoritative.
+**Folder layout:** the main folder holds the active pipeline files (below) plus `current_df.csv`, `fighters_df.csv` and `fighter_style_table.csv`, all live files kept current by the automated pipeline (§8), and `title_changes_outside_cage.csv`, the hand-kept list of off-cage title changes the pipeline reads (one row added by hand per strip, vacated belt or promotion). No other dataset snapshots or notebooks remain locally — earlier superseded snapshots (`v2_6.csv`, `v2_6_with_phase_profiles.csv`, the raw ETL-stage `..._ready_for_features.csv`, the old `v2_5.csv`) have been deleted, not archived — `current_df.csv` is rebuilt end-to-end from raw columns on every regeneration (§3), so no intermediate snapshot is authoritative.
 
 **Pipeline order:** `fighter_scrape_new.py` + `ude_scrape_new.py` (acquisition, incremental) → `dataset_processing_pipeline.py` (raw scrape → 1-row-per-fight) → `ude_points_feature_engineering_pipeline.py` (→ PDI/chronological features) → `ude_points_algorithm.py` (→ UDE points) → `ude_points_utils.py` (→ rankings/career views). `run_refresh.py` orchestrates the ETL-through-scoring half of this chain as one call (§8); the two scrapers run as separate steps before it.
 
