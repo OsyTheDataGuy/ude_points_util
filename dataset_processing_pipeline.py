@@ -588,6 +588,44 @@ def validate_dataset_regeneration(old_df: pd.DataFrame, new_df: pd.DataFrame, ke
     }
 
 
+# The ETL's output columns, in order (step 12 of run_etl_pipeline). run_refresh.py
+# also uses it to rescore the stored fights on a week with no new fights.
+ETL_OUTPUT_COLUMNS = [
+        'event_name', 'event_url', 'event_date', 'bout', 'fight_url',
+        'weight_class', 'time_format', 'method', 'details', 'time', 'round_ended',
+        'fighter_1', 'fight_day_age (yrs)_fighter_1', 'fight_result_fighter_1',
+        'kd_fighter_1', 'sig_strikes_landed_fighter_1',
+        'sig_strikes_attempted_fighter_1', 'sig_strikes_pct_fighter_1',
+        'total_strikes_landed_fighter_1', 'total_strikes_attempted_fighter_1',
+        'td_landed_fighter_1', 'td_attempted_fighter_1', 'td_pct_fighter_1',
+        'head_strikes_landed_fighter_1', 'head_strikes_attempted_fighter_1',
+        'body_strikes_landed_fighter_1', 'body_strikes_attempted_fighter_1',
+        'leg_strikes_landed_fighter_1', 'leg_strikes_attempted_fighter_1',
+        'distance_strikes_landed_fighter_1', 'distance_strikes_attempted_fighter_1',
+        'clinch_strikes_landed_fighter_1', 'clinch_strikes_attempted_fighter_1',
+        'ground_strikes_landed_fighter_1', 'ground_strikes_attempted_fighter_1',
+        'sub_att_fighter_1', 'rev_fighter_1', 'ctrl_in_secs_fighter_1',
+        'fighter_url_fighter_1', 'date_of_birth_fighter_1',
+        'Height (m)_fighter_1', 'Weight (lbs)_fighter_1', 'Reach (in)_fighter_1',
+        'Stance_fighter_1',
+        'fighter_2', 'fight_day_age (yrs)_fighter_2', 'fight_result_fighter_2',
+        'kd_fighter_2', 'sig_strikes_landed_fighter_2',
+        'sig_strikes_attempted_fighter_2', 'sig_strikes_pct_fighter_2',
+        'total_strikes_landed_fighter_2', 'total_strikes_attempted_fighter_2',
+        'td_landed_fighter_2', 'td_attempted_fighter_2', 'td_pct_fighter_2',
+        'head_strikes_landed_fighter_2', 'head_strikes_attempted_fighter_2',
+        'body_strikes_landed_fighter_2', 'body_strikes_attempted_fighter_2',
+        'leg_strikes_landed_fighter_2', 'leg_strikes_attempted_fighter_2',
+        'distance_strikes_landed_fighter_2', 'distance_strikes_attempted_fighter_2',
+        'clinch_strikes_landed_fighter_2', 'clinch_strikes_attempted_fighter_2',
+        'ground_strikes_landed_fighter_2', 'ground_strikes_attempted_fighter_2',
+        'sub_att_fighter_2', 'rev_fighter_2', 'ctrl_in_secs_fighter_2',
+        'fighter_url_fighter_2', 'date_of_birth_fighter_2',
+        'Height (m)_fighter_2', 'Weight (lbs)_fighter_2', 'Reach (in)_fighter_2',
+        'Stance_fighter_2'
+    ]
+
+
 # ==============================================================================
 # 7. Master ETL Pipeline Function
 # ==============================================================================
@@ -670,40 +708,7 @@ def run_etl_pipeline(
     validate_transformed_data(final_df, current_dataset=current_dataset)
 
     # 12. Standard desired column ordering
-    ordered_columns = [
-        'event_name', 'event_url', 'event_date', 'bout', 'fight_url',
-        'weight_class', 'time_format', 'method', 'details', 'time', 'round_ended',
-        'fighter_1', 'fight_day_age (yrs)_fighter_1', 'fight_result_fighter_1',
-        'kd_fighter_1', 'sig_strikes_landed_fighter_1',
-        'sig_strikes_attempted_fighter_1', 'sig_strikes_pct_fighter_1',
-        'total_strikes_landed_fighter_1', 'total_strikes_attempted_fighter_1',
-        'td_landed_fighter_1', 'td_attempted_fighter_1', 'td_pct_fighter_1',
-        'head_strikes_landed_fighter_1', 'head_strikes_attempted_fighter_1',
-        'body_strikes_landed_fighter_1', 'body_strikes_attempted_fighter_1',
-        'leg_strikes_landed_fighter_1', 'leg_strikes_attempted_fighter_1',
-        'distance_strikes_landed_fighter_1', 'distance_strikes_attempted_fighter_1',
-        'clinch_strikes_landed_fighter_1', 'clinch_strikes_attempted_fighter_1',
-        'ground_strikes_landed_fighter_1', 'ground_strikes_attempted_fighter_1',
-        'sub_att_fighter_1', 'rev_fighter_1', 'ctrl_in_secs_fighter_1',
-        'fighter_url_fighter_1', 'date_of_birth_fighter_1',
-        'Height (m)_fighter_1', 'Weight (lbs)_fighter_1', 'Reach (in)_fighter_1',
-        'Stance_fighter_1',
-        'fighter_2', 'fight_day_age (yrs)_fighter_2', 'fight_result_fighter_2',
-        'kd_fighter_2', 'sig_strikes_landed_fighter_2',
-        'sig_strikes_attempted_fighter_2', 'sig_strikes_pct_fighter_2',
-        'total_strikes_landed_fighter_2', 'total_strikes_attempted_fighter_2',
-        'td_landed_fighter_2', 'td_attempted_fighter_2', 'td_pct_fighter_2',
-        'head_strikes_landed_fighter_2', 'head_strikes_attempted_fighter_2',
-        'body_strikes_landed_fighter_2', 'body_strikes_attempted_fighter_2',
-        'leg_strikes_landed_fighter_2', 'leg_strikes_attempted_fighter_2',
-        'distance_strikes_landed_fighter_2', 'distance_strikes_attempted_fighter_2',
-        'clinch_strikes_landed_fighter_2', 'clinch_strikes_attempted_fighter_2',
-        'ground_strikes_landed_fighter_2', 'ground_strikes_attempted_fighter_2',
-        'sub_att_fighter_2', 'rev_fighter_2', 'ctrl_in_secs_fighter_2',
-        'fighter_url_fighter_2', 'date_of_birth_fighter_2',
-        'Height (m)_fighter_2', 'Weight (lbs)_fighter_2', 'Reach (in)_fighter_2',
-        'Stance_fighter_2'
-    ]
+    ordered_columns = ETL_OUTPUT_COLUMNS
     # Columns not named in ordered_columns are APPENDED, not dropped. By
     # this point in the pipeline every column present was deliberately
     # constructed by an earlier step -- there's no leftover junk left to

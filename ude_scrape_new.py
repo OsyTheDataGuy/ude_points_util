@@ -468,15 +468,29 @@ def run_fight_scrape(fight_details_csv, current_dataset_csv, output_csv='scraped
     latest_fights = exclude_out_of_scope_events(latest_fights)
     current_dataset = pd.read_csv(current_dataset_csv)
 
+    # Count what is waiting before scraping, so "nothing new" (0 waiting, no
+    # output file, exit 0) can't be confused with "every scrape failed"
+    # (fights waiting, none scraped -- exits non-zero).
+    pending = len(filter_new_fights_set(latest_fights, current_dataset))
+    if pending == 0:
+        print("No new fights to scrape.")
+        return
+
     latest_fights_data = scrape_fight_details_to_csv(latest_fights, current_dataset, batch_save=batch_save)
 
     # Drop rows where Fighter is null
     if not latest_fights_data.empty:
         latest_fights_data = latest_fights_data.dropna(subset=['Fighter']).reset_index(drop=True)
-        latest_fights_data.to_csv(output_csv, index=False)
-        print(f"Saved {len(latest_fights_data)} rows to {output_csv}")
-    else:
-        print("No new fights to scrape.")
+    if latest_fights_data.empty:
+        raise SystemExit(f"Scrape failed: {pending} new fights waiting, none scraped (see failed_urls.csv).")
+
+    latest_fights_data.to_csv(output_csv, index=False)
+    print(f"Saved {len(latest_fights_data)} rows to {output_csv}")
+    scraped = latest_fights_data['Fight URL'].nunique()
+    if scraped < pending:
+        # Not in current_df.csv, so they are retried automatically next refresh.
+        print(f"::warning::{pending - scraped} of {pending} new fights failed to scrape; "
+              f"they are retried next refresh (failed_urls.csv).")
 
 
 def _parse_args():

@@ -26,7 +26,7 @@ import sys
 
 import pandas as pd
 
-from dataset_processing_pipeline import run_etl_pipeline, validate_dataset_regeneration
+from dataset_processing_pipeline import run_etl_pipeline, validate_dataset_regeneration, ETL_OUTPUT_COLUMNS
 from ude_points_feature_engineering_pipeline import engineer_all_features
 from ude_points_algorithm import calculate_ude_points_with_ablation, add_ude_points_difference_columns
 from ude_points_utils import build_fighter_style_table, FIGHTER_STYLE_TABLE_CSV
@@ -58,17 +58,24 @@ def run_refresh(current_dataset_csv, fighters_csv, latest_fights_csv, latest_eve
     print("Loading inputs...")
     current_dataset = pd.read_csv(current_dataset_csv, low_memory=False)
     fighters_df = pd.read_csv(fighters_csv, low_memory=False)
-    latest_fights_df = pd.read_csv(latest_fights_csv, low_memory=False)
-    latest_events_df = pd.read_csv(latest_events_csv, low_memory=False)
     previous_production_df = pd.read_csv(previous_production_csv, low_memory=False)
 
-    print("Running ETL...")
-    raw = run_etl_pipeline(
-        scraped_fights_df=latest_fights_df,
-        events_df=latest_events_df,
-        fighters_df=fighters_df,
-        current_dataset=current_dataset,
-    )
+    if os.path.exists(latest_fights_csv):
+        latest_fights_df = pd.read_csv(latest_fights_csv, low_memory=False)
+        latest_events_df = pd.read_csv(latest_events_csv, low_memory=False)
+        print("Running ETL...")
+        raw = run_etl_pipeline(
+            scraped_fights_df=latest_fights_df,
+            events_df=latest_events_df,
+            fighters_df=fighters_df,
+            current_dataset=current_dataset,
+        )
+    else:
+        # No new fights (ude_scrape_new.py writes no file then): rescore the
+        # stored fights from their ETL-stage columns, e.g. after a title change
+        # was added to title_changes_outside_cage.csv.
+        print("No new fights: rescoring the stored fights from their ETL-stage columns...")
+        raw = current_dataset[ETL_OUTPUT_COLUMNS].copy()
 
     print("Backfilling Stance across the full historical set...")
     raw = backfill_stance(raw, fighters_df)
@@ -107,7 +114,9 @@ def _parse_args():
                          help="Prior raw/ETL-stage historical snapshot (e.g. current_df.csv) -- "
                               "NOT the fully-scored production file.")
     parser.add_argument("--fighters", required=True, help="fighters_df.csv")
-    parser.add_argument("--latest-fights", required=True, help="This run's freshly-scraped fights.")
+    parser.add_argument("--latest-fights", required=True,
+                         help="This run's freshly-scraped fights. A missing file means no new fights: "
+                              "the stored fights are rescored as they are.")
     parser.add_argument("--latest-events", required=True, help="Latest ufc_event_details.csv.")
     parser.add_argument("--previous-production-file", required=True,
                          help="The prior fully-scored production file, to diff the new one against.")
