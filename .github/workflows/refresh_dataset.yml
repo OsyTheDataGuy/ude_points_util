@@ -111,6 +111,22 @@ jobs:
             --latest-fights-csv latest_fights_df.csv \
             --output fighters_df.csv
 
+      # Appends title changes that happened outside the cage (strips, vacated
+      # belts, promotions) from Wikipedia's "List of UFC champions" to
+      # title_changes_outside_cage.csv, which update_champion_status reads.
+      # Existing rows are never changed. Never fails the run: a fetch or parse
+      # problem becomes a warning in title_changes_report.md, which the next
+      # step adds to the PR body. An event dated before fights already in the
+      # data would change their flags; validation below then stops the run on
+      # purpose (that is a deliberate re-score, done by hand).
+      - name: Add title changes from Wikipedia
+        if: steps.scrape.outputs.new_fights == 'true'
+        run: |
+          python title_changes_from_wikipedia.py \
+            --dataset current_df.csv \
+            --events title_changes_outside_cage.csv \
+            --report title_changes_report.md
+
       - name: Run full pipeline + validation
         if: steps.scrape.outputs.new_fights == 'true'
         run: |
@@ -138,6 +154,7 @@ jobs:
             --output current_df.csv \
             --numeric-tolerance 0.01 \
             | tee refresh_summary.txt
+          cat title_changes_report.md >> refresh_summary.txt
           # --numeric-tolerance 0.01: the method-PDI GLM / age IRLS fits differ
           # in the 3rd-4th decimal between this Linux runner's BLAS and whatever
           # built the committed current_df.csv. requirements.txt pins the
@@ -171,6 +188,7 @@ jobs:
             fighters_df.csv
             current_df.csv
             fighter_style_table.csv
+            title_changes_outside_cage.csv
 
       # Explicit email so a waiting PR can't be silently forgotten again, even
       # if GitHub account notifications are off/misrouted. Only fires when a PR
