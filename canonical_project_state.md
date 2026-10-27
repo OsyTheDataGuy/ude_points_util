@@ -55,28 +55,28 @@ Per fighter-side, per fight, in order: `raw_base_points` (±3 W/L) → `champion
 
 | Rank | Fighter | Record | Fights | Career Gain | Shrunk Rate |
 |---|---|---|---|---|---|
-| 1 | Georges St-Pierre | 20-2-0 | 22 | 150.7 | 4.350 |
-| 2 | Jon Jones | 22-1-0 | 24 | 156.5 | 4.264 |
-| 3 | Islam Makhachev | 18-1-0 | 19 | 118.0 | 3.673 |
+| 1 | Georges St-Pierre | 20-2-0 | 22 | 149.3 | 4.308 |
+| 2 | Jon Jones | 22-1-0 | 24 | 155.9 | 4.246 |
+| 3 | Islam Makhachev | 18-1-0 | 19 | 117.9 | 3.671 |
 | 4 | Demetrious Johnson | 15-2-1 | 18 | 94.7 | 2.971 |
-| 5 | Amanda Nunes | 16-2-0 | 18 | 91.4 | 2.856 |
+| 5 | Amanda Nunes | 16-2-0 | 18 | 91.5 | 2.856 |
 | 6 | Valentina Shevchenko | 15-3-1 | 19 | 87.7 | 2.629 |
-| 7 | Khabib Nurmagomedov | 13-0-0 | 13 | 69.5 | 2.522 |
-| 8 | Alexander Volkanovski | 15-3-0 | 18 | 80.2 | 2.453 |
+| 7 | Khabib Nurmagomedov | 13-0-0 | 13 | 69.5 | 2.521 |
+| 8 | Alexander Volkanovski | 15-3-0 | 18 | 80.1 | 2.450 |
 | 9 | Merab Dvalishvili | 14-3-0 | 17 | 63.8 | 1.939 |
-| 10 | Alex Pereira | 10-3-0 | 13 | 54.1 | 1.853 |
-| 11 | Ilia Topuria | 9-1-0 | 10 | 48.5 | 1.850 |
-| 12 | Dricus Du Plessis | 10-1-0 | 11 | 49.6 | 1.813 |
+| 10 | Alex Pereira | 10-3-0 | 13 | 54.1 | 1.851 |
+| 11 | Ilia Topuria | 9-1-0 | 10 | 48.4 | 1.846 |
+| 12 | Dricus Du Plessis | 10-1-0 | 11 | 49.4 | 1.805 |
 | 13 | Daniel Cormier | 11-3-0 | 15 | 55.9 | 1.776 |
-| 14 | Francis Ngannou | 12-2-0 | 14 | 51.4 | 1.662 |
-| 15 | Joshua Van | 11-1-0 | 12 | 47.2 | 1.625 |
-| 16 | Justin Gaethje | 11-5-0 | 16 | 53.3 | 1.610 |
+| 14 | Francis Ngannou | 12-2-0 | 14 | 51.4 | 1.661 |
+| 15 | Joshua Van | 11-1-0 | 12 | 47.2 | 1.623 |
+| 16 | Justin Gaethje | 11-5-0 | 16 | 53.3 | 1.609 |
 | 17 | Kamaru Usman | 16-4-0 | 20 | 56.7 | 1.507 |
 | 18 | Khamzat Chimaev | 9-1-0 | 10 | 40.8 | 1.468 |
 | 19 | Movsar Evloev | 10-0-0 | 10 | 40.6 | 1.455 |
 | 20 | Benson Henderson | 11-3-0 | 14 | 45.7 | 1.425 |
 
-627 fighters clear the `n_fights >= 10` floor. Topuria, Chimaev, and Evloev sit right at it (10 fights); Du Plessis (11) and Pereira (13) aren't far behind. St-Pierre's #1 spot over Jones rests on `is_champion_fighter_1`/`_2` and `title_defenses_fighter_1`/`_2` correctly distinguishing an interim reign from an undisputed one *and* ending an undisputed reign when the holder is stripped or vacates (Jones's 8–11 defenses reset after 2015, so they no longer carry into his 2019–2020 title fights). Kamaru Usman (`fighter_url=f1b2aa7853d1ed6e`) and Khamzat Chimaev (`fighter_url=767755fd74662dbf`) sit in the top 20; Aljamain Sterling (`fighter_url=cb696ebfb6598724`) and Petr Yan (`fighter_url=d661ce4da776fc20`) do not.
+627 fighters clear the `n_fights >= 10` floor. Topuria, Chimaev, and Evloev sit right at it (10 fights); Du Plessis (11) and Pereira (13) aren't far behind. St-Pierre's #1 spot over Jones rests on `is_champion_fighter_1`/`_2` and `title_defenses_fighter_1`/`_2` correctly distinguishing an interim reign from an undisputed one, counting a defense only when the undisputed champion wins (not the fight that won the belt), *and* ending an undisputed reign when the holder is stripped or vacates (Jones's 8–11 defenses reset after 2015, so they no longer carry into his 2019–2020 title fights). Kamaru Usman (`fighter_url=f1b2aa7853d1ed6e`) and Khamzat Chimaev (`fighter_url=767755fd74662dbf`) sit in the top 20; Aljamain Sterling (`fighter_url=cb696ebfb6598724`) and Petr Yan (`fighter_url=d661ce4da776fc20`) do not.
 
 ---
 

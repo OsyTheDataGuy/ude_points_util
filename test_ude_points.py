@@ -12,7 +12,8 @@ What this file checks, by section:
                              merely contains "Road to" are kept.
   3. Fighter identity     -- fighters are matched by fighter_url, not name:
                              a renamed fighter's career stays whole, two
-                             fighters sharing a name stay apart.
+                             fighters sharing a name stay apart. Title
+                             defenses skip the fight that won the belt.
   4. Fighter profile      -- the profile's dynamic_* state equals what the
                              pipeline itself stores, and it includes the
                              fighter's latest fight.
@@ -147,6 +148,22 @@ def test_pipeline_records_follow_fighter_url(df, fight_id, fighter_id, record):
     assert row[f'pre_fight_record_{side}_(W-L-D NC)'] == record
 
 
+@pytest.mark.parametrize('fight_id, fighter_id, defenses', [
+    # Georges St-Pierre entering Hendricks: 8. Winning the belt back from
+    # Serra (67948da92e6c9bdc) as interim champion is not a defense.
+    ('7ff036c99621eb1c', '6506c1d34da9c013', 8),
+    # Jon Jones entering Reyes: 2. Winning the vacant belt from Gustafsson
+    # (ceaae1db8ccde29c) while still flagged interim is not a defense.
+    ('fae99a4089f8abb0', '07f72a2a7591b409', 2),
+])
+def test_title_defenses_skip_belt_winning_fight(df, fight_id, fighter_id, defenses):
+    # Only a win by the undisputed champion (is_champion == 2) in an
+    # undisputed title bout counts as a defense.
+    row = df[df['fight_url'].str.endswith(fight_id)].iloc[0]
+    side = 'fighter_1' if row['fighter_url_fighter_1'].endswith(fighter_id) else 'fighter_2'
+    assert row[f'title_defenses_{side}'] == defenses
+
+
 def test_rankings_keep_shared_name_fighters_apart(df):
     # Grouping by name used to merge the two Bruno Silvas into one row.
     names = set(u.with_one_name_per_fighter(df)['fighter_1'])
@@ -275,7 +292,7 @@ def test_goat_ranking_top3(df):
         '07f72a2a7591b409',  # Jon Jones
         '275aca31f61ba28c',  # Islam Makhachev
     ]
-    assert top3['shrunk_rate'].round(3).tolist() == [4.350, 4.264, 3.673]
+    assert top3['shrunk_rate'].round(3).tolist() == [4.308, 4.246, 3.671]
 
 
 # ---------------------------------------------------------------------------

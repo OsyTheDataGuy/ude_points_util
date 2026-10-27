@@ -86,13 +86,24 @@ jobs:
       # trigger (re-scrape someone whose weight may have changed) needs to
       # know who just fought, which only exists after this step.
       - name: Scrape new fight details (incremental)
+        id: scrape
         run: |
           python ude_scrape_new.py \
             --fight-details-csv "base datasets from greco github/ufc_fight_details.csv" \
             --current-dataset-csv current_df.csv \
             --output latest_fights_df.csv
+          # ude_scrape_new.py writes no file when there are no new fights.
+          # The steps below need that file, so they are skipped and the run
+          # ends green with nothing to merge.
+          if [ -f latest_fights_df.csv ]; then
+            echo "new_fights=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "new_fights=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No new fights since the last refresh -- nothing to do."
+          fi
 
       - name: Scrape fighter bios (incremental)
+        if: steps.scrape.outputs.new_fights == 'true'
         run: |
           python fighter_scrape_new.py \
             --tott-csv "base datasets from greco github/ufc_fighter_tott.csv" \
@@ -101,6 +112,7 @@ jobs:
             --output fighters_df.csv
 
       - name: Run full pipeline + validation
+        if: steps.scrape.outputs.new_fights == 'true'
         run: |
           # set -o pipefail: this runner's default shell for `run:` does NOT
           # propagate a failing left-hand command through a pipe -- confirmed
@@ -143,7 +155,7 @@ jobs:
 
       - name: Open PR with the refreshed dataset
         id: cpr
-        if: success()
+        if: success() && steps.scrape.outputs.new_fights == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
           commit-message: "Weekly dataset refresh"
