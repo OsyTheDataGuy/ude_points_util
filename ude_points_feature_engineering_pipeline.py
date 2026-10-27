@@ -159,15 +159,17 @@ def update_title_defenses(df):
 
         # is_tb == 2 (not > 0): only an undisputed title bout counts as a
         # defense of the undisputed belt -- an interim-title fight shouldn't
-        # increment or reset it.
+        # increment or reset it. The winner must also ENTER as undisputed
+        # champion (2): an interim champion (1) winning the undisputed belt
+        # acquires it rather than successfully defending it.
         if champ1 > 0:
-            if r1 == 'W' and is_tb == 2:
+            if r1 == 'W' and is_tb == 2 and champ1 == 2:
                 fighter_defenses[f1][wc] += 1
             elif r1 == 'L' and is_tb == 2:
                 fighter_defenses[f1][wc] = 0
 
         if champ2 > 0:
-            if r2 == 'W' and is_tb == 2:
+            if r2 == 'W' and is_tb == 2 and champ2 == 2:
                 fighter_defenses[f2][wc] += 1
             elif r2 == 'L' and is_tb == 2:
                 fighter_defenses[f2][wc] = 0
