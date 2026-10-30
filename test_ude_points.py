@@ -18,6 +18,8 @@ What this file checks, by section:
                              date ranges agree with the champion flags and
                              with Wikipedia's reign lengths; the Wikipedia
                              parser keeps a note's text after a citation.
+                             The UFC roster (ufc_roster.csv) reads every
+                             name form and matches the right fighter.
   4. Fighter profile      -- the profile's dynamic_* state equals what the
                              pipeline itself stores, and it includes the
                              fighter's latest fight.
@@ -279,6 +281,95 @@ def test_title_changes_file_is_clean(df):
                if (e.fighter_url, e.weight_class_cleaned) not in pairs]
     assert not missing, missing
 
+
+def test_roster_status_from_wikipedia(df):
+    # ufc_roster.csv (Wikipedia, oldid=1382823554): Farid Basharat (a09ed60aa67a3f67)
+    # was released on 2026-10-14 despite 7-0 in the UFC, so he is off the roster though
+    # the 730-day rule still calls him active; Erik Perez (af62f99eb7606308) is not listed
+    # at all; Sean O'Malley (b50a426a33da0012) and Song Yadong (efb96bf3e9ada36f) are current.
+    roster = u.load_roster()
+    basharat = roster[roster['fighter_url'].str.endswith('a09ed60aa67a3f67')].iloc[0]
+    assert (basharat['status'], basharat['status_date'], basharat['reason']) == \
+        ('released', '2026-10-14', 'Contract not renewed')
+    status = u.create_fighter_status_dataset(df, as_of=pd.Timestamp('2026-10-30'), roster=roster)
+    flags = status.set_index(status['fighter_url'].str[-16:])[['active', 'on_roster']]
+    assert flags.loc['a09ed60aa67a3f67'].tolist() == [1, 0]
+    assert flags.loc['af62f99eb7606308', 'on_roster'] == 0
+    assert flags.loc[['b50a426a33da0012', 'efb96bf3e9ada36f'], 'on_roster'].tolist() == [1, 1]
+
+
+def test_roster_file_is_clean(df):
+    # One row per matched fighter, known statuses, every id a fighter in the dataset,
+    # and the page revision cited.
+    roster = u.load_roster()
+    ids = roster.loc[roster['fighter_url'] != '', 'fighter_url']
+    assert not ids.duplicated().any(), ids[ids.duplicated()].tolist()
+    assert set(roster['status']) <= {'current', 'signed', 'released', 'retired'}
+    known = set(df['fighter_url_fighter_1']) | set(df['fighter_url_fighter_2'])
+    assert set(ids) <= known
+    assert roster['source_revision_url'].str.contains('oldid=').all()
+
+
+def test_roster_parser_reads_every_name_form():
+    # Name cells come as {{sortname}} (any case), [[Target|Shown]] and plain text; a comment
+    # after a heading must not hide the section; a release row carries date and reason.
+    import roster_from_wikipedia as r
+    page = '\n'.join([
+        '===Bantamweights (135 lb, 61 kg)===<!-- note to editors -->',
+        '{| class="wikitable"',
+        '|-',
+        '|{{#invoke:flag|icon|USA}}',
+        "|{{Sortname|Sean|O'Malley|Sean O'Malley (fighter)}}",
+        '|{{age nts|1994|10|24}}',
+        '|',
+        "|{{color|green|'''Win'''}} – [[UFC Freedom 250]] (Washington) – [[Aiemann Zahabi]]",
+        '|<ref name="x"/>',
+        '|{{ntsh|10.0}}11–3',
+        '|{{ntsh|20.0}}20–3',
+        '|-',
+        '|{{#invoke:flag|icon|CHN}}',
+        '|[[Song Yadong|Song Yadong]]',
+        '|-',
+        '|{{#invoke:flag|icon|CHN}}',
+        '|Alateng Heili',
+        '|}',
+        '== Recent releases and retirements ==',
+        '{| class="wikitable"',
+        '|-',
+        '|{{dts|2026|Oct|14}}',
+        '|{{#invoke:flag|icon|AFG}}',
+        '|{{sortname|Farid|Basharat}}',
+        "|''Ferocious''",
+        '|Contract not renewed',
+        '|Bantamweight',
+        '|}',
+    ])
+    p = r.parse_page(page).set_index('name')
+    assert p.loc["Sean O'Malley", ['division', 'status', 'last_opponent', 'ufc_record']].tolist() == \
+        ['BW', 'current', 'Aiemann Zahabi', '11-3']
+    assert p.loc[['Song Yadong', 'Alateng Heili'], 'status'].tolist() == ['current', 'current']
+    assert p.loc['Farid Basharat', ['status', 'status_date', 'reason', 'division']].tolist() == \
+        ['released', '2026-10-14', 'Contract not renewed', 'BW']
+
+
+@pytest.mark.parametrize('page_name, division, fighter_id', [
+    # Word order, hyphens and spaces differ between the sites:
+    ('Alateng Heili', 'BW', '1897b7b913736a7c'),          # UFCStats "Alatengheili"
+    ('Lee Jeong-yeong', 'FW', 'd008d785f6347dc2'),
+    ("Ode' Osbourne", 'FLW', '6d68c1afe954f121'),         # UFCStats "Ode Osbourne"
+    # A middle name; the flyweight Bruno Silva, not the middleweight (12ebd7d157e91701):
+    ('José Mauro Delano', 'FW', 'd7c4956d61ae76a9'),      # UFCStats "Jose Delano"
+    ('Bruno Gustavo da Silva', 'FLW', '294aa73dbf37d281'),
+    # A short first name, and a nickname via ROSTER_ALIASES:
+    ('Cameron Rowston', 'MW', '8ebc3a8da015d70c'),        # UFCStats "Cam Rowston"
+    ('Valesca Machado', 'WSW', 'a1a91dbf41a029c4'),       # UFCStats "Tina Black"
+])
+def test_roster_names_match_the_right_fighter(df, page_name, division, fighter_id):
+    import roster_from_wikipedia as r
+    page = pd.DataFrame([{'name': page_name, 'division': division, 'status': 'current', 'status_date': '',
+                          'reason': '', 'last_opponent': '', 'ufc_record': '', 'suspended': False}])
+    data = df.assign(event_date=pd.to_datetime(df['event_date']))
+    assert r.match_names(page, data)['fighter_url'].iloc[0].endswith(fighter_id)
 
 def test_rankings_keep_shared_name_fighters_apart(df):
     # Grouping by name used to merge the two Bruno Silvas into one row.

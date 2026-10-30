@@ -182,9 +182,32 @@ jobs:
           # so current_df.csv on disk is left untouched on the runner and
           # nothing gets committed.
 
+      # Who is under UFC contract today (UFCStats has no roster status). Runs every
+      # week, after the pipeline so this week's debuts match; rewrites
+      # ufc_roster.csv only when a fighter's status changed. A page problem is a
+      # warning in the report, never a failed run.
+      - name: Update the UFC roster from Wikipedia
+        id: roster
+        run: |
+          python roster_from_wikipedia.py \
+            --dataset current_df.csv \
+            --roster ufc_roster.csv \
+            --report roster_report.md
+          if git diff --quiet -- ufc_roster.csv; then
+            echo "roster_changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "roster_changed=true" >> "$GITHUB_OUTPUT"
+          fi
+          # The pipeline step writes the PR body only when it runs.
+          if [ ! -f refresh_summary.txt ]; then
+            printf 'No new fights or title changes this week: this PR updates the UFC roster only.\n' > refresh_summary.txt
+            cat title_changes_report.md >> refresh_summary.txt
+          fi
+          cat roster_report.md >> refresh_summary.txt
+
       - name: Open PR with the refreshed dataset
         id: cpr
-        if: success() && (steps.scrape.outputs.new_fights == 'true' || steps.wiki.outputs.title_changes == 'true')
+        if: success() && (steps.scrape.outputs.new_fights == 'true' || steps.wiki.outputs.title_changes == 'true' || steps.roster.outputs.roster_changed == 'true')
         uses: peter-evans/create-pull-request@v6
         with:
           commit-message: "Weekly dataset refresh"
@@ -201,6 +224,7 @@ jobs:
             current_df.csv
             fighter_style_table.csv
             title_changes_outside_cage.csv
+            ufc_roster.csv
 
       # Explicit email so a waiting PR can't be silently forgotten again, even
       # if GitHub account notifications are off/misrouted. Only fires when a PR
