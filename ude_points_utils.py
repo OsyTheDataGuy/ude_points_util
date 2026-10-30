@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sb
+import os
 import re
 from datetime import date, datetime
 import plotly.express as px
@@ -1084,6 +1085,25 @@ def rank_fighters_by_shrunk_ude_rate_by_gender(df, gender=None, start_year=None,
 
 FIGHTER_INACTIVE_AFTER_DAYS = 730  # ~2 years since last fight
 
+# The current UFC roster from Wikipedia (roster_from_wikipedia.py, weekly refresh):
+# whether a fighter is under contract today, which time since a fight can't tell.
+ROSTER_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ufc_roster.csv')
+
+
+def load_roster(path=ROSTER_CSV):
+    """ufc_roster.csv: fighter_url, name, division, status (current / signed / released /
+    retired), status_date, reason, suspended, source_revision_url. fighter_url is blank for
+    listed fighters with no UFC fight in the dataset."""
+    return pd.read_csv(path, keep_default_na=False, dtype={'suspended': bool})
+
+
+def on_roster(fighter_urls, roster=None):
+    """1 for each fighter_url on the current UFC roster (status current or signed), else 0."""
+    roster = load_roster() if roster is None else roster
+    signed = set(roster.loc[roster['status'].isin(['current', 'signed']) & (roster['fighter_url'] != ''),
+                            'fighter_url'])
+    return pd.Series(fighter_urls).isin(signed).astype(int).to_numpy()
+
 def get_latest_fight_info(df):
     """Each fighter's most recent fight: bout, event date, fight URL, weight class."""
     df_sorted = df.sort_values(by='event_date', ascending=False)
@@ -1129,12 +1149,13 @@ def add_fighter_status(fighter_df, as_of=None):
     return fighter_df
 
 
-def create_fighter_status_dataset(df, as_of=None):
+def create_fighter_status_dataset(df, as_of=None, roster=None):
     """
-    One row per fighter: their most recent fight and whether they're still
+    One row per fighter: their most recent fight, whether they're still
     active (fought within FIGHTER_INACTIVE_AFTER_DAYS of `as_of`, default
-    today). Pass `as_of` explicitly for a reproducible cutoff -- see
-    determine_fighter_status.
+    today), and whether they're on the current UFC roster (on_roster, from
+    ufc_roster.csv -- today only, so it can't answer a past date). Pass `as_of`
+    explicitly for a reproducible cutoff -- see determine_fighter_status.
     """
     latest_fight_df = get_latest_fight_info(df)
     final_df = add_fighter_status(latest_fight_df, as_of=as_of)
@@ -1144,8 +1165,10 @@ def create_fighter_status_dataset(df, as_of=None):
     )
     final_df = final_df.rename(columns={'bout': 'most_recent_bout', 'event_date': 'most_recent_event_date'})
 
+    final_df['on_roster'] = on_roster(final_df['fighter_url'], roster)
+
     return final_df[['fighter', 'fighter_url', 'weight_class', 'most_recent_bout',
-                      'most_recent_event_date', 'fight_url', 'active']]
+                      'most_recent_event_date', 'fight_url', 'active', 'on_roster']]
 
 
 '''9. Fighter finishing potency by weight class'''
