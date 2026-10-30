@@ -17,6 +17,8 @@ script runs in the weekly refresh, before the pipeline:
                               date) stay.
   6. check_against_page()  -- agreement check: our title_defenses / is_champion
                               calls vs the page's defense lists and reign order.
+     check_reign_days()    -- every undisputed reign's length (undisputed_reigns
+                              in ude_points_utils) vs the page's listed days.
 
 Nothing here raises on a page problem. A fetch failure, a note it can't read or
 a name it can't match becomes a warning in the report, which the refresh adds to
@@ -34,6 +36,8 @@ import urllib.request
 from datetime import date
 
 import pandas as pd
+
+from ude_points_utils import undisputed_reigns
 
 WIKI_API_URL = ('https://en.wikipedia.org/w/api.php?action=query&prop=revisions&titles=List_of_UFC_champions'
                 '&rvprop=ids|content&rvslots=main&format=json&formatversion=2')
@@ -65,6 +69,19 @@ KNOWN_UNREAD_NOTES = (
 # Two events of the same fighter, division and type within this many days are
 # the same event (the file's hand-set date may differ from the page's).
 SAME_EVENT_DAYS = 31
+
+# A reign's start and length may differ from the page's by this many days (one
+# card can carry a different date on UFCStats and Wikipedia across time zones).
+REIGN_DAYS_TOLERANCE = 2
+
+# Reign lengths known to differ from the page, (division, page name, start) -> why.
+# Checked by calendar on 2026-10-30; any other difference is reported as a warning.
+KNOWN_REIGN_DAY_DIFFS = {
+    ('HW', 'Bas Rutten', '1999-05-07'): 'vacate dated by month only (stored on the 15th)',
+    ('MW', 'Robert Whittaker', '2017-12-07'): 'page lists 660; Dec 7, 2017 to Oct 6, 2019 is 668',
+    ('WBW', 'Raquel Pennington', '2024-01-20'): 'page lists 255; Jan 20 to Oct 5, 2024 is 259',
+    ('WBW', 'Julianna Peña', '2024-10-05'): 'page lists 242; Oct 5, 2024 to Jun 7, 2025 is 245',
+}
 
 
 """## 1-2. Fetch and parse the page"""
@@ -107,6 +124,26 @@ def _to_date(s):
     return pd.to_datetime(re.sub(r'\bSept\b', 'Sep', s).replace('.', ''), format='mixed')
 
 
+def _strip_refs(s):
+    """s without its <ref>s (self-closing, paired, or cut off at the end)."""
+    s = re.sub(r'<ref[^>]*/>', '', s)
+    s = re.sub(r'<ref[^>]*>.*?</ref>', '', s, flags=re.S)
+    return re.sub(r'<ref.*', '', s, flags=re.S)
+
+
+def _reign_days(cell):
+    """A reign's listed length in days: '1,134 days', or for an incumbent
+    '{{age in days|2025|11|15}}' / '{{#expr: 1526 + {{age in days|2025|04|12}}}}' counted
+    to today. None when the cell has no length (interim reigns show '—')."""
+    age = re.search(r'age in days\s*\|\s*(\d{4})\s*\|\s*(\d{1,2})\s*\|\s*(\d{1,2})', cell)
+    if age:
+        prior = re.search(r'#expr:\s*([\d,]+)\s*\+', cell)
+        since = (date.today() - date(*map(int, age.groups()))).days
+        return since + (int(prior.group(1).replace(',', '')) if prior else 0)
+    n = re.search(r'([\d,]+)\s*days', cell)
+    return int(n.group(1).replace(',', '')) if n else None
+
+
 def parse_page(wikitext):
     """Reigns, their listed defenses, and note rows, in page order per division."""
     lines = wikitext.split('\n')
@@ -122,13 +159,16 @@ def parse_page(wikitext):
                 and 'Defunct' not in line:
             wc = None
         elif wc and re.match(r'^!\s*colspan', line):
-            text = line.split("''", 1)[1] if "''" in line else line
-            # A note's <ref> can run over several lines; read to the end of the row.
+            # A note's <ref> can run over several lines, and text can follow it
+            # ("...on Oct 24, 2020.<ref>..</ref> The title was officially vacated on
+            # Mar 19, 2021."): read to the end of the row and drop the refs, not the text after them.
             k = i + 1
             while k < len(lines) and not lines[k].startswith(('|-', '|}', '!')):
                 k += 1
-            notes.append({'pos': i, 'wc': wc, 'text': re.sub(r'<ref.*', '', text).strip("' "),
-                          'ref_url': _ref_url('\n'.join(lines[i:k]), named)})
+            row = '\n'.join(lines[i:k])
+            text = _strip_refs(row)
+            text = text.split("''")[1] if "''" in line else text.split('\n')[0]
+            notes.append({'pos': i, 'wc': wc, 'text': text.strip("' \n"), 'ref_url': _ref_url(row, named)})
         elif wc and re.match(r'^!\s*(\d+|—)\s*$', line):
             block, j = [], i + 1
             while j < len(lines) and not lines[j].startswith(('|-', '|}', '==')):
@@ -138,9 +178,11 @@ def parse_page(wikitext):
             start = re.search(r'(?:align=center|text-align:center;")\|\s*' + DATE, text)
             name = _link_name(block[0]) if block else None
             interim = '—' in line
+            # The cell after the start date is the reign's length in days.
+            days_cell = text[start.end():].split('\n')[1] if start and '\n' in text[start.end():] else ''
             reigns.append({'pos': i, 'wc': wc, 'fighter': name, 'interim': interim, 'ref_url': _ref_url(text, named),
                            'promoted': bool(block) and 'promoted to undisputed' in block[0],
-                           'start': _to_date(start.group(1)) if start else None})
+                           'start': _to_date(start.group(1)) if start else None, 'days': _reign_days(days_cell)})
             for m in re.finditer(r'def\. (.+?) at (?:\[\[.+?\]\]|[^<]+?) on ' + DATE, text):
                 defenses.append({'wc': wc, 'champion': name, 'opponent': _link_name(m.group(1)) or m.group(1).strip(),
                                  'date': _to_date(m.group(2)), 'interim_reign': interim})
@@ -300,6 +342,29 @@ def check_against_page(df, reigns, defenses, notes, roster):
             'belt_changes': n_changes, 'flag_disagree': flag_disagree}
 
 
+def check_reign_days(df, events, reigns, roster, today=None):
+    """Our undisputed reigns (undisputed_reigns on the dataset + events file) vs the page's
+    listed reign lengths. A reign matches when fighter, division and start agree within
+    REIGN_DAYS_TOLERANCE days (UFCStats and Wikipedia can date one card a day apart
+    across time zones); its length must agree within the same tolerance."""
+    today = pd.Timestamp(today or date.today())
+    ours = undisputed_reigns(df, events, today)
+    ours = ours.assign(days=(ours['end'] - ours['start']).dt.days)
+    tol = pd.Timedelta(days=REIGN_DAYS_TOLERANCE)
+    page = reigns[~reigns['interim'] & reigns['days'].notna() & reigns['start'].notna()]
+    differ, missing = [], []
+    for r in page.itertuples():
+        url = match_fighter(r.fighter, r.wc, roster)
+        hit = ours[(ours['fighter_url'] == url) & (ours['weight_class_cleaned'] == r.wc)
+                   & ((ours['start'] - r.start).abs() <= tol)]
+        if hit.empty:
+            missing.append((r.wc, r.fighter, r.start.date()))
+        elif abs(hit['days'].iloc[0] - r.days) > REIGN_DAYS_TOLERANCE:
+            differ.append((r.wc, r.fighter, r.start.date(), int(r.days), int(hit['days'].iloc[0]),
+                           hit['end_reason'].iloc[0]))
+    return {'page_reigns': len(page), 'differ': differ, 'missing': missing}
+
+
 """## Report"""
 
 def run(dataset_csv, events_csv, report_path):
@@ -356,6 +421,18 @@ def run(dataset_csv, events_csv, report_path):
             lines.append('Fights that differ (known: Miletich df8d4014d8206ab1 and Shamrock b1134affa18449dd, '
                          'whose title wins UFCStats does not have): ' +
                          ', '.join(u.rsplit('/', 1)[-1] for u in check['defense_disagree'] + check['flag_disagree']))
+
+        days = check_reign_days(df, known, reigns, roster)
+        unknown = [x for x in days['differ'] if (x[0], x[1], str(x[2])) not in KNOWN_REIGN_DAY_DIFFS]
+        lines += ['', f'Reign lengths: {days["page_reigns"] - len(days["differ"]) - len(days["missing"])} of '
+                      f'{days["page_reigns"]} undisputed reigns on the page match ours within {REIGN_DAYS_TOLERANCE} '
+                      f'days; {len(days["differ"]) - len(unknown)} known differences (KNOWN_REIGN_DAY_DIFFS); '
+                      f'{len(days["missing"])} reigns UFCStats has no title fight for: '
+                      + ', '.join(f'{n} {wc} {s}' for wc, n, s in days['missing'])]
+        if unknown:
+            lines.append('**Warning -- reign lengths that differ from the page (a wrong or missing date in '
+                         'title_changes_outside_cage.csv, or a page error; check and fix or add to KNOWN_REIGN_DAY_DIFFS):**')
+            lines += [f'- {n} {wc} from {s}: page {p} days, ours {o} (ends: {why})' for wc, n, s, p, o, why in unknown]
     except Exception as exc:  # never block the data refresh on the page
         lines.append(f'**Warning -- Wikipedia check did not run:** {type(exc).__name__}: {exc}')
     text = '\n'.join(lines) + '\n'

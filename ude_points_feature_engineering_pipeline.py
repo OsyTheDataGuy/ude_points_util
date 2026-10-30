@@ -101,7 +101,7 @@ def update_champion_status(df, title_changes=None):
     'promoted' sets 2, 'stripped'/'vacated' clear a 2, 'interim_stripped'
     clears a 1. An event on a day the fighter fights must say whether it came
     before or after the card (fight_day_timing: Oliveira stripped at the
-    weigh-in, Khabib retired after his fight); check_fight_day_timing stops
+    weigh-in); check_fight_day_timing stops
     the run if it doesn't. Other same-day events apply after the card. The
     succession rule below stays as the fallback for any event not yet in the file.
     """
