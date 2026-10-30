@@ -274,6 +274,44 @@ def fighter_stats(df, fighter_name):
 
 
 '''2. Functions to Create Championship Reigns and Contendership Datasets'''
+# Every undisputed reign as a date range (for reign lengths and time-as-champion)
+def undisputed_reigns(df, title_changes, as_of):
+    """One row per undisputed reign: fighter_url, fighter, weight_class_cleaned, start, end, end_reason.
+
+    A reign starts with an undisputed title-bout win entered without the belt, or a
+    'promoted' event in title_changes. It ends at the first of: a loss in an undisputed
+    title bout in that division, a stripped/vacated event, an undisputed title bout in
+    that division without him (update_champion_status's succession rule), or as_of
+    (end_reason 'holding'). Uses the same rules as update_champion_status, so a fight
+    inside a reign is entered with is_champion == 2.
+    """
+    t = df[df['is_title_bout'] == 2]
+    sides = []
+    for s, o in (('1', '2'), ('2', '1')):
+        sides.append(pd.DataFrame({'date': pd.to_datetime(t['event_date']), 'wc': t['weight_class_cleaned'],
+                                   'fight': t['fight_url'], 'url': t[f'fighter_url_fighter_{s}'],
+                                   'name': t[f'fighter_{s}'], 'champ': t[f'is_champion_fighter_{s}'],
+                                   'res': t[f'fight_result_fighter_{s}']}))
+    S = pd.concat(sides)
+    names = {**dict(zip(title_changes['fighter_url'], title_changes['fighter'])), **dict(zip(S['url'], S['name']))}
+    starts = [(r.url, r.wc, r.date) for r in S[(S['res'] == 'W') & (S['champ'] != 2)].itertuples()]
+    promoted = title_changes[title_changes['event'] == 'promoted']
+    starts += [(e.fighter_url, e.weight_class_cleaned, e.date) for e in promoted.itertuples()]
+    off = title_changes[title_changes['event'].isin(['stripped', 'vacated'])]
+    rows = []
+    for url, wc, start in starts:
+        later = S[(S['wc'] == wc) & (S['date'] > start)]
+        ends = [(pd.Timestamp(as_of), 'holding')]
+        ends += [(d, 'lost') for d in later[(later['url'] == url) & (later['res'] == 'L')]['date']]
+        ends += [(e.date, e.event) for e in off[(off['fighter_url'] == url) & (off['weight_class_cleaned'] == wc)
+                                                 & (off['date'] > start)].itertuples()]
+        without = later.groupby('fight').filter(lambda g: url not in set(g['url']))
+        ends += [(d, 'succession') for d in without['date']]
+        end, reason = min(ends, key=lambda x: x[0])
+        rows.append({'fighter_url': url, 'fighter': names[url], 'weight_class_cleaned': wc,
+                     'start': start, 'end': end, 'end_reason': reason})
+    return pd.DataFrame(rows).sort_values(['start', 'weight_class_cleaned']).reset_index(drop=True)
+
 # Function to filter title bouts
 def filter_title_bouts(df):
     """Filter rows where the bout is a title fight."""

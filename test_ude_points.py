@@ -14,7 +14,10 @@ What this file checks, by section:
                              a renamed fighter's career stays whole, two
                              fighters sharing a name stay apart. Title
                              defenses skip the fight that won the belt, and
-                             off-cage strips/promotions are applied.
+                             off-cage strips/promotions are applied. Reign
+                             date ranges agree with the champion flags and
+                             with Wikipedia's reign lengths; the Wikipedia
+                             parser keeps a note's text after a citation.
   4. Fighter profile      -- the profile's dynamic_* state equals what the
                              pipeline itself stores, and it includes the
                              fighter's latest fight.
@@ -162,8 +165,8 @@ def test_pipeline_records_follow_fighter_url(df, fight_id, fighter_id, record):
     ('08af25ef4252b138', '8bdac25ce0bb874d', 6),
     # Jose Aldo entering McGregor: 7. Same for his WEC transfer (Hominick #1).
     ('b302e12550278ffd', 'd0f3959b4a9747e6', 7),
-    # Khabib Nurmagomedov entering Gaethje: 2. He retired that night, after
-    # the fight -- an event dated on fight day applies after the card.
+    # Khabib Nurmagomedov entering Gaethje: 2. He retired after the fight; the
+    # title was officially vacated on 2021-03-19.
     ('59eea37af7efb06c', '032cc3922d871c7f', 2),
 ])
 def test_title_defenses_skip_belt_winning_fight(df, fight_id, fighter_id, defenses):
@@ -194,12 +197,69 @@ def test_fight_day_strip_applies_before_the_card(df):
 
 def test_fight_day_event_without_timing_stops(df):
     # An event on a day the fighter fights can't be ordered without
-    # fight_day_timing: blank Khabib's and the pipeline must refuse.
+    # fight_day_timing: blank Oliveira's (UFC 274 weigh-in) and the pipeline must refuse.
     from ude_points_feature_engineering_pipeline import load_title_changes, check_fight_day_timing
     events = load_title_changes()
-    events.loc[events['fighter'] == 'Khabib Nurmagomedov', 'fight_day_timing'] = ''
+    events.loc[events['fighter'] == 'Charles Oliveira', 'fight_day_timing'] = ''
     with pytest.raises(ValueError, match='fight_day_timing'):
         check_fight_day_timing(df, events)
+
+
+def test_reigns_agree_with_champion_flags(df):
+    # undisputed_reigns: every undisputed title-bout side is entered flagged 2
+    # exactly when it falls inside one of that fighter's reigns in that division.
+    from ude_points_feature_engineering_pipeline import load_title_changes
+    R = u.undisputed_reigns(df, load_title_changes(), '2026-10-30')
+    t = df[df['is_title_bout'] == 2]
+    bad = []
+    for s in ('1', '2'):
+        for r in t.itertuples():
+            url, d = getattr(r, f'fighter_url_fighter_{s}'), pd.Timestamp(r.event_date)
+            inside = ((R['fighter_url'] == url) & (R['weight_class_cleaned'] == r.weight_class_cleaned)
+                      & (R['start'] < d) & (R['end'] >= d)).any()
+            if inside != (getattr(r, f'is_champion_fighter_{s}') == 2):
+                bad.append(r.fight_url)
+    assert not bad, bad
+
+
+@pytest.mark.parametrize('fighter_id, wc, start, days', [
+    # Khabib Nurmagomedov (032cc3922d871c7f): Wikipedia lists 1,077 days, Apr 7,
+    # 2018 to the official vacate on Mar 19, 2021 -- not his Oct 24, 2020 announcement.
+    ('032cc3922d871c7f', 'LW', '2018-04-07', 1077),
+    # Conor McGregor (f4c49976c75c5ab2): FW from Aldo (Dec 12, 2015) to the strip on
+    # Nov 26, 2016 -- Wikipedia lists 350 days, 14 of them while also LW champion.
+    ('f4c49976c75c5ab2', 'FW', '2015-12-12', 350),
+])
+def test_reign_lengths_match_wikipedia(df, fighter_id, wc, start, days):
+    from ude_points_feature_engineering_pipeline import load_title_changes
+    R = u.undisputed_reigns(df, load_title_changes(), '2026-10-30')
+    r = R[R['fighter_url'].str.endswith(fighter_id) & (R['weight_class_cleaned'] == wc)
+          & (R['start'] == pd.Timestamp(start))].iloc[0]
+    assert (r['end'] - r['start']).days == days
+
+
+def test_wikipedia_note_keeps_text_after_citation():
+    # The parser used to cut a note at its first <ref>, losing "officially
+    # vacated on ..." when it follows a citation (Khabib, Nunes on the live page).
+    import title_changes_from_wikipedia as w
+    page = '\n'.join([
+        '===Lightweight Championship===',
+        '! 10',
+        '| {{flagicon|RUS}} [[Khabib Nurmagomedov]]',
+        '| [[UFC 223]]',
+        '| align=center| Apr 7, 2018',
+        '| align=center| 1,077 days',
+        '|',
+        '|-',
+        "! colspan=6 |''Nurmagomedov announced his retirement on October 24, 2020.<ref>{{cite web",
+        '| url=https://example.com/a | title=t}}</ref> The title was officially vacated on March 19, 2021.\'\'',
+        '|-',
+    ])
+    reigns, _, notes = w.parse_page(page)
+    assert reigns['days'].tolist() == [1077]
+    assert notes['text'].iloc[0].endswith('officially vacated on March 19, 2021.')
+    events, _ = w.events_from_page(reigns, notes)
+    assert events['date'].iloc[0] == pd.Timestamp('2021-03-19')
 
 
 def test_title_changes_file_is_clean(df):
