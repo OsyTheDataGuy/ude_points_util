@@ -12,6 +12,11 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from ude_points_algorithm import is_no_score_fight
+from ude_contender_utils import (
+    ContenderPolicy, DEFAULT_CONTENDER_POLICY, DEFAULT_TITLE_PRIORITY,
+    current_division_win_run, assess_contender_qualification,
+    prioritize_title_contenders, fight_down_pool_decision, attribute_catchweight_divisions,
+)
 
 '''0. Fighter identity'''
 
