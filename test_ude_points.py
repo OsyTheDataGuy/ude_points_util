@@ -20,6 +20,7 @@ What this file checks, by section:
                              parser keeps a note's text after a citation.
                              The UFC roster (ufc_roster.csv) reads every
                              name form and matches the right fighter.
+                             Career ranks join by fight and fighter id.
   4. Fighter profile      -- the profile's dynamic_* state equals what the
                              pipeline itself stores, and it includes the
                              fighter's latest fight.
@@ -136,6 +137,28 @@ def test_shared_name_raises_and_ids_work(df):
         u.create_fighter_career_dataset(before, 'Bruno Silva')
     assert len(u.create_fighter_career_dataset(before, '12ebd7d157e91701')) == 11
     assert len(u.create_fighter_career_dataset(before, '294aa73dbf37d281')) == 12
+
+
+def test_career_ranks_join_by_fight_and_fighter(df):
+    # The real rankings file is private, so this uses a made-up one with rows
+    # for the first fight in Jose Aldo's (d0f3959b4a9747e6) career table: his
+    # side and his opponent's. Only his side may join; fights missing from the
+    # file get blank rank columns.
+    before = df[pd.to_datetime(df['event_date']) < AS_OF]
+    plain = u.create_fighter_career_dataset(before, 'd0f3959b4a9747e6')
+    fight = url_id(plain['fight_url'].iloc[0])
+    opponent = url_id(plain['opponent_fighter_url'].iloc[0])
+    row = dict(ranking_date='2020-01-01', own_status='ranked', own_rank='3', own_rank_wc='BW',
+               opp_status='champion', opp_rank='0', opp_rank_wc='BW', opp_rank_today='', opp_rank_today_wc='')
+    ranks = pd.DataFrame([dict(row, fight_id=fight, fighter_id='d0f3959b4a9747e6'),
+                          dict(row, fight_id=fight, fighter_id=opponent, own_rank='9')])
+    career = u.create_fighter_career_dataset(before, 'd0f3959b4a9747e6', ranks=ranks)
+    assert len(career) == len(plain)
+    assert list(career.columns) == list(plain.columns) + u.CAREER_RANK_COLUMNS
+    assert career['own_rank'].iloc[0] == '3' and career['opp_status'].iloc[0] == 'champion'
+    assert career['own_rank'].iloc[1:].isna().all()
+    with pytest.raises(ValueError, match='missing columns'):
+        u.create_fighter_career_dataset(before, 'd0f3959b4a9747e6', ranks=ranks.drop(columns='opp_rank'))
 
 
 @pytest.mark.parametrize('fight_id, fighter_id, record', [

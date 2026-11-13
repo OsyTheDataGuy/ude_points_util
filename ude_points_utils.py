@@ -83,7 +83,34 @@ def with_one_name_per_fighter(df):
 
 
 '''1. Functions to Create Fighter Career Dataset'''
-def create_fighter_career_dataset(df, fighter_name):
+CAREER_RANK_COLUMNS = ['ranking_date', 'own_status', 'own_rank', 'own_rank_wc',
+                       'opp_status', 'opp_rank', 'opp_rank_wc', 'opp_rank_today', 'opp_rank_today_wc']
+
+
+def add_career_ranks(career, ranks):
+    """
+    Adds both fighters' UFC ranking standing as at each fight to a career table.
+
+    ranks is the private rankings file fight_ranks.csv (one row per fighter per
+    fight, keyed by fight_id and fighter_id, the short UFCStats ids). It is not
+    in this repo: its source's terms forbid sharing the data, so load it from
+    your own storage. Fights it doesn't cover (e.g. newer than the file) get
+    blank rank columns; fights before 2013-02-04 say "no rankings yet".
+    """
+    missing = set(CAREER_RANK_COLUMNS + ['fight_id', 'fighter_id']) - set(ranks.columns)
+    if missing:
+        raise ValueError(f'ranks is missing columns {sorted(missing)}: pass fight_ranks.csv')
+    r = ranks[['fight_id', 'fighter_id'] + CAREER_RANK_COLUMNS]
+    if r.duplicated(['fight_id', 'fighter_id']).any():
+        raise ValueError('ranks has more than one row for a fighter in a fight')
+    keys = pd.DataFrame({'fight_id': career['fight_url'].str.split('/').str[-1],
+                         'fighter_id': career['fighter_url'].str.split('/').str[-1]}, index=career.index)
+    merged = keys.merge(r, on=['fight_id', 'fighter_id'], how='left')
+    merged.index = career.index
+    return pd.concat([career, merged[CAREER_RANK_COLUMNS]], axis=1)
+
+
+def create_fighter_career_dataset(df, fighter_name, ranks=None):
     """
     Creates a dataset of the specified fighter's career.
 
@@ -92,6 +119,9 @@ def create_fighter_career_dataset(df, fighter_name):
     - fighter_name (str): The fighter -- a name, fighter_url or its id
       (see resolve_fighter_url). Matched by fighter_url, so a career filed
       under two names comes back whole.
+    - ranks (pd.DataFrame, optional): the private fight_ranks.csv. When given,
+      each fight also shows both fighters' UFC ranking standing that week
+      (see add_career_ranks). Without it the result is unchanged.
 
     Returns:
     - pd.DataFrame: A new dataset containing the career details of the fighter.
@@ -129,6 +159,8 @@ def create_fighter_career_dataset(df, fighter_name):
     opponent_details = extract_opponent_details_programmatically(fighter_fights, fighter_url)
     final_dataset = reorganize_fight_data_programmatically(fighter_fights, fighter_details, opponent_details)
     final_dataset = create_diff_columns(final_dataset)
+    if ranks is not None:
+        final_dataset = add_career_ranks(final_dataset, ranks)
 
     return final_dataset
 

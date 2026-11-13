@@ -110,7 +110,7 @@ Two computed-but-unconsumed-by-scoring pathways are retained deliberately, not d
 ---
 
 ## 4. Career Trajectories & Utilities
-`ude_points_utils.create_fighter_career_dataset` converts the two-sided fight dataframe into fighter-specific career trajectories. Fighters are matched by `fighter_url`, not name: every function that takes a fighter accepts any name they have fought under, a full `fighter_url`, or its 16-character id (`resolve_fighter_url`; a name two fighters share raises), and functions that group by name relabel first (`with_one_name_per_fighter`). The feature pipeline's state machines (records, streaks, champion status, title defenses, career means, rematches) and the scoring ledger key on `fighter_url` as well.
+`ude_points_utils.create_fighter_career_dataset` converts the two-sided fight dataframe into fighter-specific career trajectories. Its optional `ranks=` argument adds both fighters' UFC ranking standing as at each fight (`add_career_ranks`), joined by fight and fighter id from the private `fight_ranks.csv`; that file is not in the repo because its source's terms forbid sharing the data. Fighters are matched by `fighter_url`, not name: every function that takes a fighter accepts any name they have fought under, a full `fighter_url`, or its 16-character id (`resolve_fighter_url`; a name two fighters share raises), and functions that group by name relabel first (`with_one_name_per_fighter`). The feature pipeline's state machines (records, streaks, champion status, title defenses, career means, rematches) and the scoring ledger key on `fighter_url` as well.
 ```text
 fight-level dataset 
         ↓
