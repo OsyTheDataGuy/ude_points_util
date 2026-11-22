@@ -85,10 +85,21 @@ lw_goats = rank_fighters_by_shrunk_ude_rate_by_weight_class(df, weight_class='LW
 To run a refresh manually instead of waiting for the schedule:
 
 ```bash
-python ude_scrape_new.py --fight-details-csv <path> --current-dataset-csv current_df.csv --output latest_fights_df.csv
+python ude_scrape_new.py --fight-details-csv <path> --current-dataset-csv current_df.csv --output latest_fights_df.csv --rounds-output latest_rounds.csv
 python fighter_scrape_new.py --tott-csv <path> --existing-fighters-csv fighters_df.csv --latest-fights-csv latest_fights_df.csv --output fighters_df.csv
 python run_refresh.py --current-dataset current_df.csv --fighters fighters_df.csv --latest-fights latest_fights_df.csv --latest-events <path> --previous-production-file current_df.csv --output current_df.csv
+python fight_rounds.py --live latest_rounds.csv
 ```
+
+## Raw fight rounds
+
+[`fight_rounds.csv`](fight_rounds.csv) has one row per `(fight_url, round_number)`, including the final partial round. Join to `current_df.csv` by `fight_url`. Names, fighter URLs and side numbers follow the fight dataset. Each side has raw landed/attempted strikes (significant, total, head/body/leg and distance/clinch/ground), takedowns landed/attempted, knockdowns, submission attempts, reversals and control seconds. Empty fields mean unavailable. The CSV contains no UDE scores or judging estimates.
+
+The weekly scraper reads round tables from the same fight page as the totals. After the existing fight refresh, `fight_rounds.py` validates round numbers, both fighters and available count totals against the production row. It fills missing fights from the archive, retries a bounded number of unresolved UFCStats pages and lists remaining gaps in the job log. Existing rows survive retries; repeated runs with no additions leave the file byte-identical. To backfill a fresh output, pass the Greco files as `--details ufc_fight_details.csv --archive ufc_fight_stats.csv`. Use `--retry-limit N` for direct page retries with the existing browser setup.
+
+**Control clocks:** Round clocks and the separately reported fight totals sometimes differ. Preserve the reported round seconds. Archive differences larger than one second per round of the bout require a direct round-page check. The refresh summary counts fighters’ bouts with any clock discrepancy once per fight and the log identifies larger differences by fight URL and side. In the initial backfill, 3,272 of 8,733 fights differed on at least one clock; all but one differed by six seconds or less on either side. For [Tukhugov–Murphy](http://ufcstats.com/fight-details/bef4df43d6052a02), the round sums differ from the production clocks by +555 and −558 seconds respectively. Exclude that bout from control-time comparisons unless the discrepancy is resolved.
+
+The initial 20,805 rows cover all 8,733 production fights through November 14, 2026. They use the [pinned round archive](https://github.com/Greco1899/scrape_ufc_stats/tree/e87487e35b0c8526f4fcf56997de7f8f96472d06) and direct UFCStats pages for gaps. Run `python -m unittest test_fight_rounds` for the known-answer and refresh checks.
 
 ## Data source
 
