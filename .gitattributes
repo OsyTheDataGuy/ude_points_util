@@ -1,0 +1,6 @@
+/fight_rounds.csv text eol=lf
+/fight_rounds.py text eol=lf
+/test_fight_rounds.py text eol=lf
+/ude_scrape_new.py text eol=lf
+/.github/workflows/refresh_dataset.yml text eol=lf
+/.github/workflows/test_rounds.yml text eol=lf
